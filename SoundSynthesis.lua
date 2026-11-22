@@ -416,7 +416,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			-- while the small hiss term adds combustion texture without a noise floor.
 			local excitation = (slow - fast) + resonant
 				+ hiss * self.rng:NextNumber(-1, 1) * 0.18
-			local headerOut = delayProcess(self.headers[index], excitation)
+			local headerOut = allpassProcess(self.headers[index], excitation)
 			local bank = (event.collector ~= nil and event.collector or event.bank or 0) + 1
 			if bank <= 1 then
 				bank0 += headerOut
