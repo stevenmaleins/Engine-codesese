@@ -89,39 +89,18 @@ local function makeDelay(delaySamples, feedback, lpCutoff, sampleRate)
 end
 
 local function delayProcess(line, input)
-	-- Fractional-sample interpolated feedback delay. Use explicit positive
-	-- wrapping rather than applying modulo to a negative read position.
-	-- Both read locations are then guaranteed to be valid ring-buffer samples.
-	local writeIndex = math.floor(clamp(line.index or 0, 0, RING_SIZE - 1))
-	local delaySamples = clamp(line.delay or 2, 2, RING_SIZE - 2)
-	local readPosition = writeIndex - delaySamples
-	if readPosition < 0 then
-		readPosition += RING_SIZE
-	end
-	if readPosition >= RING_SIZE then
-		readPosition -= RING_SIZE
-	end
-
+	-- Fractional-sample interpolated feedback delay, matching the reference
+	-- tube/runner model and avoiding fixed integer-delay comb coloration.
+	local readPosition = (line.index - line.delay) % RING_SIZE
 	local readIndex = math.floor(readPosition)
 	local fraction = readPosition - readIndex
-	local nextIndex = readIndex + 1
-	if nextIndex >= RING_SIZE then
-		nextIndex = 0
-	end
-
-	local firstOffset = readIndex * 4
-	local secondOffset = nextIndex * 4
-	local first = buffer.readf32(line.data, firstOffset)
-	local second = buffer.readf32(line.data, secondOffset)
+	local nextIndex = (readIndex + 1) % RING_SIZE
+	local first = buffer.readf32(line.data, readIndex * 4)
+	local second = buffer.readf32(line.data, nextIndex * 4)
 	local delayed = first + (second - first) * fraction
-
 	line.lp += line.lpCoef * (delayed - line.lp)
-	buffer.writef32(line.data, writeIndex * 4, input + line.feedback * line.lp)
-	writeIndex += 1
-	if writeIndex >= RING_SIZE then
-		writeIndex = 0
-	end
-	line.index = writeIndex
+	buffer.writef32(line.data, line.index * 4, input + line.feedback * line.lp)
+	line.index = (line.index + 1) % RING_SIZE
 	return delayed
 end
 
