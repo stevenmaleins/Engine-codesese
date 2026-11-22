@@ -617,14 +617,16 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local micMix = 0.35 + 0.65 * mic
 		local engineMix = 1 - 0.75 * mic
 		local master = (p.master or 1) * 1.0
-		local leftSignal = (leftRaw * micMix + exhaustL * engineMix * 0.20) * master
-		local rightSignal = (rightRaw * micMix + exhaustR * engineMix * 0.20) * master
+		local leftSignal = (leftRaw * micMix + exhaustL * engineMix * 0.50) * master
+		local rightSignal = (rightRaw * micMix + exhaustR * engineMix * 0.50) * master
 
 		-- Remove subsonic/DC drift without cutting the exhaust firing fundamental.
 		local leftDc = leftSignal - self.dcInput[1] + 0.995 * self.dcOutput[1]
 		local rightDc = rightSignal - self.dcInput[2] + 0.995 * self.dcOutput[2]
 		self.dcInput[1], self.dcInput[2] = leftSignal, rightSignal
 		self.dcOutput[1], self.dcOutput[2] = leftDc, rightDc
+		-- Keep the exhaust as the dominant engine source; accessories are mixed
+		-- around it rather than competing with it.
 		local leftOut = softClip(leftDc, 1.4)
 		local rightOut = softClip(rightDc, 1.4)
 
