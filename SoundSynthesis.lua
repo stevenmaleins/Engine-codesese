@@ -77,6 +77,7 @@ local function nextPinkNoise(self)
 end
 
 local function makeDelay(delaySamples, feedback, lpCutoff, sampleRate)
+	-- Short reflection/room delay. Unlike the exhaust tubes, this is an echo line.
 	return {
 		data = buffer.create(RING_SIZE * 4),
 		index = 0,
@@ -85,6 +86,26 @@ local function makeDelay(delaySamples, feedback, lpCutoff, sampleRate)
 		lp = 0,
 		lpCoef = coefficient(sampleRate, lpCutoff),
 	}
+end
+
+local function makeAllpassDelay(delaySamples, coefficientValue)
+	-- All-pass delay used for gas-column propagation through runners and pipes.
+	-- It preserves the broad frequency balance while dispersing phase like a tube.
+	return {
+		data = buffer.create(RING_SIZE * 4),
+		index = 0,
+		delay = math.floor(clamp(delaySamples, 2, RING_SIZE - 2)),
+		feedback = clamp(coefficientValue or 0, -0.95, 0.95),
+	}
+end
+
+local function allpassProcess(line, input)
+	local readIndex = (line.index - line.delay) % RING_SIZE
+	local delayed = buffer.readf32(line.data, readIndex * 4)
+	local internal = input - line.feedback * delayed
+	buffer.writef32(line.data, line.index * 4, internal)
+	line.index = (line.index + 1) % RING_SIZE
+	return delayed + line.feedback * internal
 end
 
 local function delayProcess(line, input)
@@ -96,15 +117,16 @@ local function delayProcess(line, input)
 	return delayed
 end
 
-local function newExhaustChain(params, sampleRate)
+local function newExhaustChain(params, sampleRate, lengthScale)
 	local muffler = clamp(params.muffler or 0.3, 0, 1)
+	lengthScale = lengthScale or 1
 	local function delayMs(length)
-		return 2 * math.max(0.05, length or 0.5) * sampleRate / SPEED_OF_SOUND
+		return 2 * math.max(0.05, length or 0.5) * lengthScale * sampleRate / SPEED_OF_SOUND
 	end
 	return {
-		collector = makeDelay(delayMs(params.collectorLength), -0.45, 4500, sampleRate),
-		chamber = makeDelay(delayMs(params.chamber), 0.6, 2500, sampleRate),
-		tail = makeDelay(delayMs(params.tailLength), -0.38, 5000 - 2500 * muffler, sampleRate),
+		collector = makeAllpassDelay(delayMs(params.collectorLength), -0.45),
+		chamber = makeAllpassDelay(delayMs(params.chamber), 0.6),
+		tail = makeAllpassDelay(delayMs(params.tailLength), -0.38),
 		muffler = muffler,
 		chamberGain = params.chamberGain or 0.5,
 		mufLp = 0,
@@ -118,13 +140,15 @@ local function newExhaustChain(params, sampleRate)
 end
 
 local function processExhaust(chain, input, load)
-	local collector = delayProcess(chain.collector, input)
+	local collector = allpassProcess(chain.collector, input)
 	chain.mufLp += chain.mufLpCoef * (collector - chain.mufLp)
-	local chamber = delayProcess(chain.chamber, chain.mufLp)
+	local chamber = allpassProcess(chain.chamber, chain.mufLp)
 	local mixed = collector + chain.chamberGain * chamber
 		+ chain.muffler * (0.5 * chain.mufLp - collector)
-	local tail = delayProcess(chain.tail, mixed)
-	local differentiated = tail + (0.25 + 0.55 * load) * (tail - chain.previous)
+	local tail = allpassProcess(chain.tail, mixed)
+	-- Keep a moderate blow-down edge without the brittle high-frequency boost
+	-- of a large differentiator.
+	local differentiated = tail + (0.55 + 0.85 * load) * (tail - chain.previous)
 	chain.previous = tail
 	local scaled = differentiated * (0.9 + 0.35 * (1 - chain.muffler))
 	local clipped = scaled > 0 and (2.2 * tanh(scaled / 2.2))
@@ -144,12 +168,12 @@ function SoundSynthesis.new(params, sampleRate)
 	for index, event in ipairs(firing) do
 		local jitter = (((index - 1) * 7919) % 97) / 97 - 0.5
 		local length = (params.headerLength or 0.5) * (1 + 0.2 * jitter)
-		headers[index] = makeDelay(2 * length * sampleRate / SPEED_OF_SOUND, -0.55, 5500, sampleRate)
+		headers[index] = makeAllpassDelay(2 * length * sampleRate / SPEED_OF_SOUND, -0.55)
 	end
 
 	local chains = {
-		newExhaustChain(params, sampleRate),
-		newExhaustChain(params, sampleRate),
+		newExhaustChain(params, sampleRate, 1),
+		newExhaustChain(params, sampleRate, 1.035),
 	}
 
 	return setmetatable({
@@ -158,18 +182,26 @@ function SoundSynthesis.new(params, sampleRate)
 		phase = 0,
 		phaseInitialized = false,
 		audioTime = 0,
-		pulseEnvelopes = table.create(math.max(1, #firing), 0),
-		pulseDecay = math.exp(-1 / (0.018 * sampleRate)),
+		pulseFast = table.create(math.max(1, #firing), 0),
+		pulseSlow = table.create(math.max(1, #firing), 0),
+		pulseHiss = table.create(math.max(1, #firing), 0),
+		pulseFastDecay = math.exp(-1 / (0.0018 * sampleRate)),
+		pulseSlowDecay = math.exp(-1 / (0.014 * sampleRate)),
+		pulseHissDecay = math.exp(-1 / (0.0035 * sampleRate)),
 		headers = headers,
 		chains = chains,
 		rng = Random.new(17391),
-		intakeLine = makeDelay(2 * (params.intakeLength or 0.3) * sampleRate / SPEED_OF_SOUND, -0.5, 2500, sampleRate),
+		intakeLine = makeAllpassDelay(2 * (params.intakeLength or 0.3) * sampleRate / SPEED_OF_SOUND, -0.5),
 		intakeLp = 0,
 		intakeLpCoef = coefficient(sampleRate, 900),
 		blockLp = 0,
 		blockLpCoef = coefficient(sampleRate, 140),
 		bodyLp = {0, 0},
 		bodyLpCoef = {coefficient(sampleRate, 110), coefficient(sampleRate, 240)},
+		turboLp = {0, 0},
+		turboLpCoef = coefficient(sampleRate, 2200),
+		dcInput = {0, 0},
+		dcOutput = {0, 0},
 		windLp = 0,
 		windRum = 0,
 		windCounter = 0,
@@ -353,9 +385,13 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local newCycle = math.floor((self.phase - target) / cycle)
 			if newCycle > oldCycle then
 				local firingStrength = state.running and 1 or (state.starter and 0.32 or 0.035)
-				self.pulseEnvelopes[index] = math.max(
-					self.pulseEnvelopes[index],
-					firingStrength * (0.12 + 0.72 * load)
+				local impulse = firingStrength * (0.12 + 0.72 * load)
+					* (0.9 + 0.2 * self.rng:NextNumber())
+				self.pulseFast[index] = math.min(2, self.pulseFast[index] + impulse)
+				self.pulseSlow[index] = math.min(2, self.pulseSlow[index] + impulse)
+				self.pulseHiss[index] = math.max(
+					self.pulseHiss[index],
+					impulse * (0.12 + 0.24 * self.rng:NextNumber())
 				)
 				if (p.pops or 0) > 0 and rpm > (p.idleRpm or 700) * 1.5 and load < 0.04 then
 					local liftEnvelope = math.exp(-liftTime / 0.7) + 0.012 * rpmFraction
@@ -368,13 +404,19 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 					end
 				end
 			end
-			local envelope = self.pulseEnvelopes[index]
-			self.pulseEnvelopes[index] = envelope * self.pulseDecay
-			local cylinderNoise = self.rng:NextNumber(-1, 1) * 0.08
+			local fast = self.pulseFast[index] * self.pulseFastDecay
+			local slow = self.pulseSlow[index] * self.pulseSlowDecay
+			local hiss = self.pulseHiss[index] * self.pulseHissDecay
+			self.pulseFast[index] = fast
+			self.pulseSlow[index] = slow
+			self.pulseHiss[index] = hiss
 			local eventPhase = ((self.phase - (event.angle or 0)) % cycle) / cycle
-			local resonant = math.sin(eventPhase * TAU * 2) * 0.18
-			local excitation = (envelope * (cylinderNoise * 0.56 + resonant + 0.2))
-			local headerOut = delayProcess(self.headers[index], excitation)
+			local resonant = math.sin(eventPhase * TAU * 2) * slow * 0.10
+			-- A fast/slow envelope difference makes a short pressure impulse,
+			-- while the small hiss term adds combustion texture without a noise floor.
+			local excitation = (slow - fast) + resonant
+				+ hiss * self.rng:NextNumber(-1, 1) * 0.18
+			local headerOut = allpassProcess(self.headers[index], excitation)
 			local bank = (event.collector ~= nil and event.collector or event.bank or 0) + 1
 			if bank <= 1 then
 				bank0 += headerOut
@@ -383,26 +425,35 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		local exhaustL = processExhaust(self.chains[1], bank0, load)
-		local exhaustR
-		if banks > 1 then
-			exhaustR = processExhaust(self.chains[2], bank1, load)
-		else
-			exhaustR = exhaustL
+		local headerLeft = bank0
+		local headerRight = banks > 1 and bank1 or bank0
+
+		-- A turbocharger attenuates the sharpest exhaust energy before the
+		-- collector; preserve the lower pressure pulse for the engine-body layer.
+		if p.induction == "turbo" then
+			self.turboLp[1] += self.turboLpCoef * (headerLeft - self.turboLp[1])
+			self.turboLp[2] += self.turboLpCoef * (headerRight - self.turboLp[2])
+			headerLeft = self.turboLp[1] * 0.55
+			headerRight = banks > 1 and self.turboLp[2] * 0.55 or headerLeft
 		end
+
+		local exhaustL = processExhaust(self.chains[1], headerLeft, load)
+		local exhaustR = banks > 1
+			and processExhaust(self.chains[2], headerRight, load)
+			or exhaustL
 
 		-- Intake tract: speed/load-scaled stochastic induction noise through a pipe delay.
 		local intakeNoise = noise * (0.015 + load * 0.08) * (0.15 + rpmFraction)
 		self.intakeLp += self.intakeLpCoef * (intakeNoise - self.intakeLp)
-		local intake = (delayProcess(self.intakeLine, self.intakeLp) + self.intakeLp) * intakeMix
+		local intake = (allpassProcess(self.intakeLine, self.intakeLp) + self.intakeLp) * intakeMix
 
-		-- Low frequency block vibration and firing tick.
-		local rawBody = (exhaustL + exhaustR) * 0.5
+		-- Low-frequency block/body resonance must be driven from the header
+		-- pressure pulses, not the already high-passed tailpipe signal.
+		local rawBody = headerLeft + headerRight
 		self.blockLp += self.blockLpCoef * (rawBody - self.blockLp)
-		local bodySignal = self.blockLp * 1.2 * body * 0.22
-		self.bodyLp[1] += self.bodyLpCoef[1] * (bodySignal - self.bodyLp[1])
-		self.bodyLp[2] += self.bodyLpCoef[2] * (bodySignal - self.bodyLp[2])
-		local bodyOut = self.bodyLp[1] * 0.55 + self.bodyLp[2] * 0.22
+		self.bodyLp[1] += self.bodyLpCoef[1] * (rawBody - self.bodyLp[1])
+		self.bodyLp[2] += self.bodyLpCoef[2] * (self.bodyLp[1] - self.bodyLp[2])
+		local bodyOut = self.bodyLp[2] * (0.55 * body) + self.blockLp * (0.035 * body)
 
 		-- Procedural afterfire transient with crack, hiss and low thump components.
 		local popNoise = self.rng:NextNumber(-1, 1)
@@ -576,8 +627,16 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local micMix = 0.35 + 0.65 * mic
 		local engineMix = 1 - 0.75 * mic
 		local master = (p.master or 1) * 1.0
-		local leftOut = softClip((leftRaw * micMix + exhaustL * engineMix * 0.20) * master, 1.4)
-		local rightOut = softClip((rightRaw * micMix + exhaustR * engineMix * 0.20) * master, 1.4)
+		local leftSignal = (leftRaw * micMix + exhaustL * engineMix * 0.20) * master
+		local rightSignal = (rightRaw * micMix + exhaustR * engineMix * 0.20) * master
+
+		-- Remove subsonic/DC drift without cutting the exhaust firing fundamental.
+		local leftDc = leftSignal - self.dcInput[1] + 0.995 * self.dcOutput[1]
+		local rightDc = rightSignal - self.dcInput[2] + 0.995 * self.dcOutput[2]
+		self.dcInput[1], self.dcInput[2] = leftSignal, rightSignal
+		self.dcOutput[1], self.dcOutput[2] = leftDc, rightDc
+		local leftOut = softClip(leftDc, 1.4)
+		local rightOut = softClip(rightDc, 1.4)
 
 		buffer.writef32(left, sample * 4, leftOut)
 		buffer.writef32(right, sample * 4, rightOut)

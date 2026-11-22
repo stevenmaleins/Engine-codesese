@@ -111,10 +111,10 @@ end
 
 local function makeParams(selectedPreset)
 	local built = EngineConfig.BuildWorkletParams(selectedPreset, nil, {
-		mic = 0.25,
-		body = 2.5,
-		room = 0.18,
-		cabin = 0.2,
+		mic = 0.35,
+		body = 1.35,
+		room = 0.08,
+		cabin = 0.12,
 		wind = 1,
 		master = 0.8,
 		clip = 0.15,
