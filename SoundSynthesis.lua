@@ -483,6 +483,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 	local superWhine = p.induction == "super" and (p.whine or 0) > 0
 	local turboWhine = p.induction == "turbo" and (p.whine or 0) > 0
 	local cabinCoef = coefficient(sampleRate, 12000 - 8500 * clamp(p.cabin or 0, 0, 1))
+	local reportedThrottle = type(state.throttle) == "number" and clamp(state.throttle, 0, 1) or nil
 
 	for sample = 0, frameCount - 1 do
 		local alpha = alphaStart + (alphaEnd - alphaStart) * ((sample + 1) / frameCount)
@@ -504,6 +505,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local liftTime = math.max(0, liftFrom + (liftTo - liftFrom) * alpha)
 		local cutBurst = math.max(0, cutBurstFrom + (cutBurstTo - cutBurstFrom) * alpha)
 		local throttle = throttleFrom + (throttleTo - throttleFrom) * alpha
+		local physicalThrottle = reportedThrottle or throttle
 		local gear = state.gear or 0
 		local gearRatio = gear > 0 and (p.gears[gear] or 1) or 1
 		local kmh = speed * 3.6
@@ -782,7 +784,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				local scale = 1.5 * (0.5 + 0.5 * flowScale)
 				local step = TAU * (p.flRate or 14) * 1.25
 					* (0.35 + 0.65 * flowScale) / sampleRate
-				local damping = (0.06 + 3 * load) * math.sqrt(math.max(0, self.bovPressure))
+				local damping = (0.06 + 3 * physicalThrottle) * math.sqrt(math.max(0, self.bovPressure))
 				local pressureStep = scale * (flowCurve - self.bovPressure) * step
 				local flowStep = (self.bovFlow - damping) / scale * step
 				self.bovFlow = clamp(self.bovFlow + pressureStep, -3, 3)
@@ -796,7 +798,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 
 				-- Use the actual throttle edge for release timing. Smoothed engine load
 				-- lags behind the pedal and made the flutter start late or disappear.
-				local stillReleasing = throttle > 0.12 or spool < 0.06
+				local stillReleasing = physicalThrottle > 0.12 or spool < 0.06
 				local fadeTau = stillReleasing and 0.018 or 0.004
 				local fadeTarget = stillReleasing and 0 or 1
 				self.surgeFade += (fadeTarget - self.surgeFade)
@@ -835,7 +837,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			else
 				-- Vent-style valves use a decaying pressure reservoir and broad airflow noise.
 				self.ventP = math.max(0, self.ventP - (0.5 + 2.5 * load) / sampleRate)
-				local openTarget = load < 0.12 and self.ventP > 0.04 and 1 or 0
+				local openTarget = physicalThrottle < 0.12 and self.ventP > 0.04 and 1 or 0
 				local openTau = openTarget > self.ventV and 0.025 or 0.05
 				self.ventV += (openTarget - self.ventV)
 					* (1 - math.exp(-1 / (openTau * sampleRate)))
