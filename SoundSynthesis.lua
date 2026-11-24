@@ -397,8 +397,9 @@ function SoundSynthesis:_CheckEvents(state)
 	local boost = state.boost or 0
 	local boostDrop = self.previousBoost - boost
 	local throttleLift = self.previousThrottle > 0.30 and throttle < 0.05
+	local separateBoostDump = boostDrop > 0.12 and self.bovEnvelope < 0.03
 	if p.induction == "turbo" and p.bov ~= "none"
-		and (boostDrop > 0.07 or throttleLift) then
+		and (throttleLift or separateBoostDump) then
 		local boostAmount = clamp(self.previousBoost / math.max(0.35, p.boost or 1), 0, 1)
 		local spool = clamp(state.turbo or self.soundTurbo or 0, 0, 1.2)
 		if boostAmount > 0.04 then
