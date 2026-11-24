@@ -141,23 +141,21 @@ local function makeDelay(delaySamples, feedback, lpCutoff, sampleRate)
 end
 
 local function delayProcess(line, input)
-	-- Fractional-sample feedback delay with explicit positive wrapping.
-	-- Audio buffers use byte offsets, so keep every cursor an integer sample index.
-	local writeIndex = line.index or 0
-	if type(writeIndex) ~= "number" or writeIndex ~= writeIndex
-		or writeIndex == math.huge or writeIndex == -math.huge then
+	-- The ring cursor is an integer invariant maintained by makeDelay and this
+	-- function. Wrap explicitly so every buffer offset is valid and integral.
+	local writeIndex = line.index
+	if writeIndex < 0 or writeIndex >= RING_SIZE then
 		writeIndex = 0
 	end
-	writeIndex = math.floor(clamp(writeIndex, 0, RING_SIZE - 1))
 
-	local delaySamples = line.delay or 2
-	if type(delaySamples) ~= "number" or delaySamples ~= delaySamples
-		or delaySamples == math.huge or delaySamples == -math.huge then
-		delaySamples = 2
+	-- Validate the allocation only at ring wrap, not on every audio sample.
+	-- The hot path stays light enough for 48 kHz real-time synthesis.
+	if writeIndex == 0 and buffer.len(line.data) ~= RING_SIZE * 4 then
+		line.data = buffer.create(RING_SIZE * 4)
+		line.lp = 0
 	end
-	delaySamples = clamp(delaySamples, 2, RING_SIZE - 2)
 
-	local readPosition = writeIndex - delaySamples
+	local readPosition = writeIndex - line.delay
 	if readPosition < 0 then
 		readPosition += RING_SIZE
 	end
@@ -165,24 +163,15 @@ local function delayProcess(line, input)
 		readPosition -= RING_SIZE
 	end
 
-	local readIndex = math.floor(clamp(readPosition, 0, RING_SIZE - 1))
-	local fraction = clamp(readPosition - readIndex, 0, 1)
+	local readIndex = math.floor(readPosition)
+	local fraction = readPosition - readIndex
 	local nextIndex = readIndex + 1
 	if nextIndex >= RING_SIZE then
 		nextIndex = 0
 	end
 
-	-- Recover safely if a stale or mismatched module supplied a malformed line.
-	if buffer.len(line.data) ~= RING_SIZE * 4 then
-		line.data = buffer.create(RING_SIZE * 4)
-		line.lp = 0
-		writeIndex = 0
-	end
-
-	local firstOffset = readIndex * 4
-	local secondOffset = nextIndex * 4
-	local first = buffer.readf32(line.data, firstOffset)
-	local second = buffer.readf32(line.data, secondOffset)
+	local first = buffer.readf32(line.data, readIndex * 4)
+	local second = buffer.readf32(line.data, nextIndex * 4)
 	local delayed = first + (second - first) * fraction
 
 	line.lp += line.lpCoef * (delayed - line.lp)
