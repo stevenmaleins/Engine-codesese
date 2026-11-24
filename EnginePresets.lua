@@ -1423,6 +1423,7 @@ local PresetData = {
 			["popThump"] = 0.7,
 			["camOverlap"] = 0.3,
 			["chamberGain"] = 1,
+			["intakeResonance"] = 0.95,
 			["wind"] = 0.9,
 		},
 	},
