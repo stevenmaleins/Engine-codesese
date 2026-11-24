@@ -663,8 +663,8 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			setBandpass(self.intakeFormant, sampleRate, self.intakeFormantHz, 1.35)
 		end
 
-		local intakeNoise = pinkNoise * intakeTone
-			* (0.045 + 0.06 * math.sqrt(load))
+		local intakeNoise = noise * intakeTone
+			* (0.12 + 0.14 * math.sqrt(load))
 		self.intakeLp += self.intakeLpCoef * (intakeNoise - self.intakeLp)
 		local intakeTube = delayProcess(self.intakeLine, self.intakeLp) + self.intakeLp
 		local intakeResonance = processBiquad(self.intakeFormant, intakeTube)
