@@ -283,6 +283,11 @@ function SoundSynthesis.new(params, sampleRate)
 		bovBp = newBiquad(),
 		bovBp2 = newBiquad(),
 		bovFilterCounter = 0,
+		gearWhineFilter = newBiquad(),
+		gearWhineHz = 600,
+		gearWhinePhase = 0,
+		gearWhineMix = 0,
+		gearWhineCounter = 0,
 		headers = headers,
 		chains = chains,
 		rng = Random.new(17391),
@@ -869,21 +874,49 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		-- Gear mesh whine: frequency follows the gearbox input/output shaft and tooth order.
+		-- Straight-cut gearbox whirr: keep the mesh character, but avoid the
+		-- piercing dual-sine stack. A broad, speed-following noise resonance carries
+		-- the gear texture while one subdued, smoothly tracked tone supplies the whine.
 		local gearTone = 0
+		local targetGearWhineMix = 0
 		if gearWhine > 0 and gear > 0 and omegaIn > 1 then
+			targetGearWhineMix = 1
 			local outputHz = (omegaIn / gearRatio) / TAU
 			local inputHz = omegaIn / TAU
-			local order = p.gearWhineOrder or 11
-			local inputOrder = (p.gearWhineTeeth and p.gearWhineTeeth[gear]) or p.gearWhineOrderIn or 23
+			local order = (p.gearWhineTeeth and p.gearWhineTeeth[gear])
+				or p.gearWhineOrder or 11
+			local inputOrder = p.gearWhineOrderIn or 23
 			local meshHz = outputHz * order
-			local meshPhase = (self.audioTime * meshHz) % 1
-			local inputPhase = (self.audioTime * inputHz * inputOrder) % 1
+			local inputMeshHz = inputHz * inputOrder
+			local inputShare = clamp(p.gearWhineIn or 0.3, 0, 1)
+			-- Mostly follow this gear's output tooth rate, with a small input-shaft
+			-- contribution. The input component never drives a sharp high-frequency tone.
+			local sourceHz = meshHz * (1 - 0.25 * inputShare)
+				+ inputMeshHz * (0.25 * inputShare)
+			-- Compress the tooth-mesh frequency into a comfortable audible range.
+			local targetHz = clamp(260 + math.sqrt(math.max(0, sourceHz)) * 13, 380, 1450)
+			self.gearWhineHz += (targetHz - self.gearWhineHz)
+				* (1 - math.exp(-1 / (0.035 * sampleRate)))
+			self.gearWhineCounter += 1
+			if self.gearWhineCounter % 64 == 1 then
+				setBandpass(self.gearWhineFilter, sampleRate, self.gearWhineHz, 1.25)
+			end
+			self.gearWhinePhase += self.gearWhineHz / sampleRate
+			if self.gearWhinePhase >= 1 then
+				self.gearWhinePhase -= math.floor(self.gearWhinePhase)
+			end
+			local meshTone = math.sin(self.gearWhinePhase * TAU)
+			local gearNoise = processBiquad(self.gearWhineFilter, pinkNoise)
 			local torqueFactor = clamp(math.abs(shaftTorque) / math.max(1, p.peakTorque), 0, 1.5)
-			gearTone = gearWhine * (0.025 + 0.20 * torqueFactor)
-				* (math.sin(meshPhase * TAU) + 0.25 * math.sin(meshPhase * TAU * 2)
-					+ 0.10 * math.sin(inputPhase * TAU))
+			local loadMix = 0.65 + 0.35 * clamp(torqueFactor, 0, 1)
+			gearTone = gearWhine * loadMix
+				* (gearNoise * (0.38 + 0.08 * inputShare)
+					+ meshTone * (0.040 + 0.018 * inputShare))
 		end
+		local gearMixTau = targetGearWhineMix > self.gearWhineMix and 0.025 or 0.065
+		self.gearWhineMix += (targetGearWhineMix - self.gearWhineMix)
+			* (1 - math.exp(-1 / (gearMixTau * sampleRate)))
+		gearTone *= self.gearWhineMix
 		local ersTone = 0
 		if (p.mguk or 0) > 0 then
 			local ersFrequency = rpm * 0.16
