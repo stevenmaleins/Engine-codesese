@@ -108,6 +108,26 @@ local function raisedSineWindow(angleDegrees, startDegrees, endDegrees)
 	return value * value
 end
 
+local function outputLimit(self, signal, channel, master, clipAmount)
+	if clipAmount <= 0 then
+		return tanh(signal * master * 1.8)
+	end
+
+	local magnitude = math.abs(signal)
+	local envelope = self.clipEnv[channel]
+	if magnitude > envelope then
+		envelope += (magnitude - envelope) * 0.02
+	else
+		envelope += (magnitude - envelope) * 0.0003
+	end
+	self.clipEnv[channel] = math.max(0, envelope)
+
+	local peak = math.max(0.001, envelope)
+	local ceiling = peak * (1 - 0.8 * clipAmount)
+	local limited = clamp(signal, -ceiling, ceiling) * math.pow(peak / ceiling, 0.8)
+	return tanh(limited * master * 1.8)
+end
+
 local function makeDelay(delaySamples, feedback, lpCutoff, sampleRate)
 	-- Short reflection/room delay. Unlike the exhaust tubes, this is an echo line.
 	return {
@@ -493,14 +513,12 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local gear = state.gear or 0
 		local gearRatio = gear > 0 and (p.gears[gear] or 1) or 1
 		local kmh = speed * 3.6
-		local intakeMix = 0.055 + load * 0.10
 		local rpmFraction = clamp(rpm / math.max(1, p.redline), 0, 1.5)
 		local boostWhine = 0
 		local noise = self.rng:NextNumber(-1, 1)
 		local pinkNoise = nextPinkNoise(self)
 		self.audioTime += 1 / sampleRate
 		local crankStep = rpm * 6 / sampleRate
-		local oldPhase = self.phase
 		self.phase += crankStep
 		local runningTarget = state.running and 1 or (state.starter and 0.30 or 0)
 		local runningTau = runningTarget > self.runningMix and 0.025 or 0.14
@@ -555,7 +573,6 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 					local variation = 0.08 + 0.22 * idleRoughness
 						* (1 - load) * (1 - load) + 0.5 * (1 - self.runningMix)
 					local pressure = effectiveLoad * (0.35 + 0.65 * self.runningMix)
-						* (0.3 + 0.7 * rpmTexture)
 					self.p0[index] = pressure
 						* (1 + variation * self.rng:NextNumber(-1, 1))
 				else
@@ -603,9 +620,9 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			if cylinderPhase < 180 then
 				pressureRumble += self.p0[index] * pressureProfile(cylinderPhase)
 			end
-			if cylinderPhase >= 540 or cylinderPhase < 180 then
-				local pressureAngle = cylinderPhase >= 540 and (720 - cylinderPhase) or cylinderPhase
-				pressureRumble += 0.3 * effectiveLoad * pressureProfile(pressureAngle)
+			if cylinderPhase >= 540 then
+				pressureRumble += 0.3 * effectiveLoad
+					* pressureProfile(720 - cylinderPhase)
 			end
 
 			-- Intake resonance follows cylinder phase and engine speed. The filter
@@ -644,6 +661,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local exhaustL = processExhaust(self.chains[1], headerLeft, load)
 		local exhaustR = processExhaust(self.chains[2], headerRight, load)
 
+		-- Match the reference radiation point: body coloration comes from the
+		-- same header signal after turbo attenuation, not the raw unfiltered pulses.
+		bodySource = headerLeft + headerRight
+
 		-- Keep the lower body resonance from the cylinder pressure waveform.
 		self.blockLp += self.blockLpCoef * (pressureRumble - self.blockLp)
 		self.bodyLp[1] += self.bodyLpCoef[1] * (bodySource - self.bodyLp[1])
@@ -655,8 +676,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		self.intakeCounter += 1
 		local redline = math.max(1800, p.redline or 6800)
 		local highRevFactor = clamp((redline - 2500) / 6500, 0, 1)
-		local topFormantHz = 380 + 220 * highRevFactor
-		local targetFormantHz = 220 + (topFormantHz - 220) * clamp(rpm / redline, 0, 1)
+		local topFormantHz = clamp(350 + (redline - 4000) * 0.05, 380, 850)
+		local rpmPosition = clamp(rpm / redline, 0, 1)
+		local targetFormantHz = 210
+			+ (topFormantHz - 210) * math.pow(rpmPosition, 1.2)
 		if self.intakeCounter % 64 == 1
 			or math.abs(targetFormantHz - self.intakeFormantHz) > 45 then
 			self.intakeFormantHz += (targetFormantHz - self.intakeFormantHz) * 0.35
@@ -964,25 +987,8 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		-- A fixed saturator was exaggerating sharp edges and adding more "robot" harmonics.
 		local master = p.master or 1
 		local clipAmount = clamp(p.clip or 0.15, 0, 1)
-		local function outputLimit(signal, channel)
-			if clipAmount <= 0 then
-				return tanh(signal * master * 2.6)
-			end
-			local magnitude = math.abs(signal)
-			local envelope = self.clipEnv[channel]
-			if magnitude > envelope then
-				envelope += (magnitude - envelope) * 0.02
-			else
-				envelope += (magnitude - envelope) * 0.0003
-			end
-			self.clipEnv[channel] = math.max(0, envelope)
-			local peak = math.max(0.001, envelope)
-			local ceiling = peak * (1 - 0.8 * clipAmount)
-			local limited = clamp(signal, -ceiling, ceiling) * math.pow(peak / ceiling, 0.8)
-			return tanh(limited * master * 2.6)
-		end
-		local leftOut = outputLimit(leftDc, 1)
-		local rightOut = outputLimit(rightDc, 2)
+		local leftOut = outputLimit(self, leftDc, 1, master, clipAmount)
+		local rightOut = outputLimit(self, rightDc, 2, master, clipAmount)
 
 		buffer.writef32(left, sample * 4, leftOut)
 		buffer.writef32(right, sample * 4, rightOut)
