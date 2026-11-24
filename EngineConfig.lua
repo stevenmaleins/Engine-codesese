@@ -7,7 +7,7 @@ local GearboxConfig = require(script.Parent:WaitForChild("GearboxConfig"))
 local EngineConfig = {}
 
 EngineConfig.DefaultSound = {
-	pops = 0.5,
+	pops = 0,
 	popRate = 1,
 	popSub = 4,
 	popSpread = 10,
