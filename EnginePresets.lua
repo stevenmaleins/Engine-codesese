@@ -92,7 +92,7 @@ local PresetData = {
 		["peakTorque"] = 230,
 		["inertia"] = 0.1,
 		["sound"] = {
-			["gearWhine"] = 0.58,
+			["gearWhine"] = 0.80,
 			["induction"] = "turbo",
 			["boost"] = 1.6,
 			["lag"] = 0.35,
@@ -567,7 +567,7 @@ local PresetData = {
 		["sound"] = {
 			["pops"] = 0.6,
 			["popBang"] = 0.2,
-			["gearWhine"] = 0.65,
+			["gearWhine"] = 0.85,
 		},
 	},
 	{
@@ -748,7 +748,7 @@ local PresetData = {
 		["peakTorque"] = 330,
 		["inertia"] = 0.06,
 		["sound"] = {
-			["gearWhine"] = 0.22,
+			["gearWhine"] = 0.38,
 			["gearWhineOrder"] = 24,
 			["gearWhineIn"] = 0.15,
 			["pops"] = 0,
@@ -794,7 +794,7 @@ local PresetData = {
 		["peakTorque"] = 370,
 		["inertia"] = 0.05,
 		["sound"] = {
-			["gearWhine"] = 0.22,
+			["gearWhine"] = 0.38,
 			["gearWhineOrder"] = 24,
 			["gearWhineIn"] = 0.15,
 			["pops"] = 0,
@@ -840,7 +840,7 @@ local PresetData = {
 		["peakTorque"] = 300,
 		["inertia"] = 0.04,
 		["sound"] = {
-			["gearWhine"] = 0.22,
+			["gearWhine"] = 0.38,
 			["gearWhineOrder"] = 24,
 			["gearWhineIn"] = 0.15,
 			["pops"] = 0,
@@ -887,7 +887,7 @@ local PresetData = {
 		["peakTorque"] = 200,
 		["inertia"] = 0.05,
 		["sound"] = {
-			["gearWhine"] = 0.22,
+			["gearWhine"] = 0.38,
 			["gearWhineOrder"] = 24,
 			["gearWhineIn"] = 0.15,
 			["induction"] = "turbo",
@@ -1378,7 +1378,7 @@ local PresetData = {
 			["popThump"] = 1.3,
 			["idleRough"] = 1.3,
 			["camOverlap"] = 0.2,
-			["gearWhine"] = 0.48,
+			["gearWhine"] = 0.68,
 		},
 	},
 	{
@@ -1696,7 +1696,7 @@ local PresetData = {
 			["idleRough"] = 1.6,
 			["camOverlap"] = 0.9,
 			["chamberGain"] = 0.6,
-			["gearWhine"] = 0.42,
+			["gearWhine"] = 0.58,
 		},
 	},
 	{
@@ -1930,7 +1930,7 @@ local PresetData = {
 		["sound"] = {
 			["pops"] = 0.5,
 			["popBang"] = 0.1,
-			["gearWhine"] = 0.65,
+			["gearWhine"] = 0.85,
 			["gearWhineOrder"] = 15,
 			["gearWhineIn"] = 0.4,
 			["gearWhineTeeth"] = {
@@ -2242,7 +2242,7 @@ local PresetData = {
 			["bov"] = "flutter",
 			["pops"] = 0.9,
 			["popBang"] = 0.5,
-			["gearWhine"] = 0.58,
+			["gearWhine"] = 0.80,
 		},
 	},
 	{

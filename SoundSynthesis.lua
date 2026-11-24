@@ -910,13 +910,15 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local torqueFactor = clamp(math.abs(shaftTorque) / math.max(1, p.peakTorque), 0, 1.5)
 			local loadMix = 0.65 + 0.35 * clamp(torqueFactor, 0, 1)
 			gearTone = gearWhine * loadMix
-				* (gearNoise * (0.38 + 0.08 * inputShare)
-					+ meshTone * (0.040 + 0.018 * inputShare))
+				* (gearNoise * (0.62 + 0.10 * inputShare)
+					+ meshTone * (0.055 + 0.022 * inputShare))
 		end
 		local gearMixTau = targetGearWhineMix > self.gearWhineMix and 0.025 or 0.065
 		self.gearWhineMix += (targetGearWhineMix - self.gearWhineMix)
 			* (1 - math.exp(-1 / (gearMixTau * sampleRate)))
 		gearTone *= self.gearWhineMix
+		-- Boost the filtered mechanical layer without restoring the old piercing dual-tone.
+		gearTone *= 1.35
 		local ersTone = 0
 		if (p.mguk or 0) > 0 then
 			local ersFrequency = rpm * 0.16
@@ -997,7 +999,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			* (1 - 0.75 * mic)
 		local tickSound = self.tick * noise * 0.012 * (1 - rpmFraction) * (1 - rpmFraction)
 		local engineAux = self.blockLp * 1.2 + intake + tickSound
-			+ (headerLeft + headerRight) * 0.02 + gearTone * 0.65
+			+ (headerLeft + headerRight) * 0.02 + gearTone * 0.90
 			+ ersTone + boostWhine + bov + pop
 		local auxiliaryMix = 0.35 + 0.65 * mic
 		local leftRaw = exhaustLeft + engineAux * auxiliaryMix + bodyOut + windLeft + tyre
