@@ -888,7 +888,11 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local inputOrder = p.gearWhineOrderIn or 23
 			local meshHz = outputHz * order
 			local inputMeshHz = inputHz * inputOrder
-			local sourceHz = math.max(meshHz, inputMeshHz)
+			local inputShare = clamp(p.gearWhineIn or 0.3, 0, 1)
+			-- Mostly follow this gear's output tooth rate, with a small input-shaft
+			-- contribution. The input component never drives a sharp high-frequency tone.
+			local sourceHz = meshHz * (1 - 0.25 * inputShare)
+				+ inputMeshHz * (0.25 * inputShare)
 			-- Compress the tooth-mesh frequency into a comfortable audible range.
 			local targetHz = clamp(260 + math.sqrt(math.max(0, sourceHz)) * 13, 380, 1450)
 			self.gearWhineHz += (targetHz - self.gearWhineHz)
@@ -905,7 +909,6 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local gearNoise = processBiquad(self.gearWhineFilter, pinkNoise)
 			local torqueFactor = clamp(math.abs(shaftTorque) / math.max(1, p.peakTorque), 0, 1.5)
 			local loadMix = 0.65 + 0.35 * clamp(torqueFactor, 0, 1)
-			local inputShare = clamp(p.gearWhineIn or 0.3, 0, 1)
 			gearTone = gearWhine * loadMix
 				* (gearNoise * (0.38 + 0.08 * inputShare)
 					+ meshTone * (0.040 + 0.018 * inputShare))
