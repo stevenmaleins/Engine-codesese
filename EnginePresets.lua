@@ -92,7 +92,7 @@ local PresetData = {
 		["peakTorque"] = 230,
 		["inertia"] = 0.1,
 		["sound"] = {
-			["gearWhine"] = 0.7,
+			["gearWhine"] = 0.58,
 			["induction"] = "turbo",
 			["boost"] = 1.6,
 			["lag"] = 0.35,
@@ -567,7 +567,7 @@ local PresetData = {
 		["sound"] = {
 			["pops"] = 0.6,
 			["popBang"] = 0.2,
-			["gearWhine"] = 0.85,
+			["gearWhine"] = 0.65,
 		},
 	},
 	{
@@ -1378,7 +1378,7 @@ local PresetData = {
 			["popThump"] = 1.3,
 			["idleRough"] = 1.3,
 			["camOverlap"] = 0.2,
-			["gearWhine"] = 0.6,
+			["gearWhine"] = 0.48,
 		},
 	},
 	{
@@ -1696,7 +1696,7 @@ local PresetData = {
 			["idleRough"] = 1.6,
 			["camOverlap"] = 0.9,
 			["chamberGain"] = 0.6,
-			["gearWhine"] = 0.5,
+			["gearWhine"] = 0.42,
 		},
 	},
 	{
@@ -1930,7 +1930,7 @@ local PresetData = {
 		["sound"] = {
 			["pops"] = 0.5,
 			["popBang"] = 0.1,
-			["gearWhine"] = 0.9,
+			["gearWhine"] = 0.65,
 			["gearWhineOrder"] = 15,
 			["gearWhineIn"] = 0.4,
 			["gearWhineTeeth"] = {
@@ -2242,7 +2242,7 @@ local PresetData = {
 			["bov"] = "flutter",
 			["pops"] = 0.9,
 			["popBang"] = 0.5,
-			["gearWhine"] = 0.75,
+			["gearWhine"] = 0.58,
 		},
 	},
 	{
