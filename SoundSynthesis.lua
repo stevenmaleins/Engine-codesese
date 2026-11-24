@@ -76,6 +76,38 @@ local function nextPinkNoise(self)
 	return output
 end
 
+local function pressureProfile(angleDegrees)
+	local angle = angleDegrees * PI / 180
+	return math.pow(1 + 4.5 * (1 - math.cos(angle)), -1.3)
+end
+
+local function pressureEnvelope(angleDegrees, riseDegrees, startDegrees)
+	if angleDegrees < startDegrees or angleDegrees >= 375 then
+		return 0
+	end
+
+	local rise = math.max(0.5, riseDegrees)
+	local t = (angleDegrees - startDegrees) / rise
+	if t < 1 then
+		return t * t * (3 - 2 * t)
+	end
+
+	local tail = (375 - angleDegrees) / 70
+	if tail < 1 then
+		return tail * tail * (3 - 2 * tail)
+	end
+	return 1
+end
+
+local function raisedSineWindow(angleDegrees, startDegrees, endDegrees)
+	if angleDegrees < startDegrees or angleDegrees >= endDegrees then
+		return 0
+	end
+	local phase = PI * (angleDegrees - startDegrees) / (endDegrees - startDegrees)
+	local value = math.sin(phase)
+	return value * value
+end
+
 local function makeDelay(delaySamples, feedback, lpCutoff, sampleRate)
 	-- Short reflection/room delay. Unlike the exhaust tubes, this is an echo line.
 	return {
@@ -208,33 +240,40 @@ function SoundSynthesis.new(params, sampleRate)
 		audioTime = 0,
 		audioLoad = 0,
 		runningMix = 0,
+		mufflerState = clamp(params.muffler or 0.3, 0, 1),
 		soundTurbo = 0,
 		turboPhase = 0,
-		turboWobblePhase = 0,
+		whooshLp = 0,
 		turboNoiseHigh = 0,
 		turboNoiseLow = 0,
-		turboNoiseHighCoef = coefficient(sampleRate, 4600),
-		turboNoiseLowCoef = coefficient(sampleRate, 1350),
-		engineRumbleLow = 0,
-		engineRumbleSub = 0,
-		engineRumbleLowCoef = coefficient(sampleRate, 180),
-		engineRumbleSubCoef = coefficient(sampleRate, 46),
-		bovNoiseHigh = 0,
-		bovNoiseLow = 0,
-		bovNoiseHighCoef = coefficient(sampleRate, 6500),
-		bovNoiseLowCoef = coefficient(sampleRate, 900),
-		levelFollower = 0,
-		compressorGain = 1,
-		levelAttackCoef = 1 - math.exp(-1 / (0.008 * sampleRate)),
-		levelReleaseCoef = 1 - math.exp(-1 / (0.110 * sampleRate)),
-		compressorAttackCoef = 1 - math.exp(-1 / (0.012 * sampleRate)),
-		compressorReleaseCoef = 1 - math.exp(-1 / (0.180 * sampleRate)),
-		pulseFast = table.create(math.max(1, #firing), 0),
-		pulseSlow = table.create(math.max(1, #firing), 0),
-		pulseHiss = table.create(math.max(1, #firing), 0),
-		pulseFastDecay = math.exp(-1 / (0.00125 * sampleRate)),
-		pulseSlowDecay = math.exp(-1 / (0.0058 * sampleRate)),
-		pulseHissDecay = math.exp(-1 / (0.0018 * sampleRate)),
+		turboNoiseHighCoef = coefficient(sampleRate, 2200),
+		turboNoiseLowCoef = coefficient(sampleRate, 350),
+		prevPsi = table.create(math.max(1, #firing), 0),
+		p0 = table.create(math.max(1, #firing), 0),
+		pe = table.create(math.max(1, #firing), 0),
+		crack = table.create(math.max(1, #firing), 0),
+		evoJit = table.create(math.max(1, #firing), 0),
+		wet = table.create(math.max(1, #firing), 0),
+		kBlow = 1 / (0.0015 * sampleRate),
+		crackDecay = math.exp(-1 / (0.0005 * sampleRate)),
+		tick = 0,
+		tickDecay = math.exp(-1 / (0.0007 * sampleRate)),
+		intakeFormant = newBiquad(),
+		intakeFormantHz = 0,
+		intakeCounter = 0,
+		clipEnv = {0, 0},
+		bovFlow = 0,
+		bovPressure = 0,
+		bovRev = 0,
+		bovStart = 1,
+		surgeFade = 0,
+		surgePhase = 0,
+		ventP = 0,
+		ventV = 0,
+		jetState = 0,
+		bovBp = newBiquad(),
+		bovBp2 = newBiquad(),
+		bovFilterCounter = 0,
 		headers = headers,
 		chains = chains,
 		rng = Random.new(17391),
@@ -346,11 +385,18 @@ function SoundSynthesis:_CheckEvents(state)
 	local throttleLift = self.previousThrottle > 0.30 and throttle < 0.05
 	if p.induction == "turbo" and p.bov ~= "none"
 		and (boostDrop > 0.07 or throttleLift) then
-		-- Normalize boost to the selected preset's boost range, not absolute
-		-- bar-like units, so even moderate spool produces an audible vent.
 		local boostAmount = clamp(self.previousBoost / math.max(0.35, p.boost or 1), 0, 1)
+		local spool = clamp(state.turbo or self.soundTurbo or 0, 0, 1.2)
 		if boostAmount > 0.04 then
 			self.bovEnvelope = math.max(self.bovEnvelope, boostAmount)
+			self.bovStart = boostAmount
+			self.bovFlow = math.max(self.bovFlow, math.max(0.1, spool))
+			self.bovPressure = math.max(self.bovPressure, 1.29 * spool * spool)
+			self.bovRev = 0
+			self.surgeFade = 0
+			self.ventP = self.previousBoost
+			self.ventV = 0
+			self.jetState = 0
 		end
 	end
 
@@ -403,6 +449,23 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 	self:_CheckEvents(state)
 
 	local muffler = clamp(p.muffler or 0.3, 0, 1)
+	local valveOpen = state.valveOpen
+	if type(valveOpen) ~= "boolean" then
+		valveOpen = p.valve == "open"
+			or (p.valve == "auto" and (state.rpm or 0) >= (p.valveRpm or 3500))
+	end
+	local targetMuffler = valveOpen and muffler or clamp(muffler + 0.55, 0, 1)
+	local blockSeconds = frameCount / sampleRate
+	self.mufflerState += (targetMuffler - self.mufflerState)
+		* (1 - math.exp(-blockSeconds / 0.25))
+	for _, chain in ipairs(self.chains) do
+		if math.abs(chain.muffler - self.mufflerState) > 0.003 then
+			chain.muffler = self.mufflerState
+			chain.mufLpCoef = coefficient(sampleRate, 10000 - 7500 * self.mufflerState)
+			chain.tail.lpCoef = coefficient(sampleRate, 3400 - 1300 * self.mufflerState)
+		end
+	end
+
 	local superWhine = p.induction == "super" and (p.whine or 0) > 0
 	local turboWhine = p.induction == "turbo" and (p.whine or 0) > 0
 	local cabinCoef = coefficient(sampleRate, 12000 - 8500 * clamp(p.cabin or 0, 0, 1))
@@ -444,108 +507,171 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		self.runningMix += (runningTarget - self.runningMix)
 			* (1 - math.exp(-1 / (runningTau * sampleRate)))
 
-		-- Cylinder exhaust excitation, with each runner having its own resonant delay.
+		-- The LFA reference and the other presets share a combustion-pressure source.
+		-- Every cylinder has its own phase, pressure envelope and tiny timing/energy variation.
 		local bank0, bank1 = 0, 0
+		local pressureRumble = 0
+		local intakeTone = 0
+		local effectiveLoad = 0.3 + 0.7 * load
+		local rpmTexture = clamp(rpm / 2500, 0, 1)
+		local hiCam = state.hiCam == true
+		local pressureStart = hiCam and 112 or 135
+		local camShift = hiCam and 18 or 0
+		local camScale = hiCam and 1.7 or 1
+		local phaseScale = 720 / math.max(720, cycle)
+		local blowdownAmount = clamp((p.blowdownSharp or 0)
+			* clamp((load - 0.12) / 0.88, 0, 1), 0, 1)
+		local pulseRise = math.min(
+			14 / (1 + 1.33 * blowdownAmount),
+			0.006 * math.max(300, rpm) / (1 + 2 * blowdownAmount)
+		)
+		local crackStrength = 3 * math.sqrt(blowdownAmount)
+		local overrun = load < 0.03 and rpm > (p.idleRpm or 700) * 1.4
+		local idleRoughness = clamp(p.idleRough or 1, 0, 3)
+		local camOverlap = clamp(p.camOverlap or 0, 0, 1)
+
 		for index, event in ipairs(p.firing) do
-			local target = ((event.angle or 0) + 135) % cycle
-			local oldCycle = math.floor((oldPhase - target) / cycle)
-			local newCycle = math.floor((self.phase - target) / cycle)
-			if newCycle > oldCycle then
-				local firingStrength = state.running and 1 or (state.starter and 0.32 or 0.035)
-				-- Keep the no-throttle idle alive, then let load add body rather
-				-- than multiplying the entire engine sound by five or six times.
-				local impulse = firingStrength
-					* (0.16 + 0.30 * math.sqrt(load) + 0.025 * rpmFraction)
-					* (0.78 + 0.44 * self.rng:NextNumber())
-				self.pulseFast[index] = math.min(2, self.pulseFast[index] + impulse)
-				self.pulseSlow[index] = math.min(2, self.pulseSlow[index] + impulse)
-				self.pulseHiss[index] = math.max(
-					self.pulseHiss[index],
-					impulse * (0.12 + 0.24 * self.rng:NextNumber())
-				)
-				if (p.pops or 0) > 0 and rpm > (p.idleRpm or 700) * 1.5 and load < 0.04 then
-					local liftEnvelope = math.exp(-liftTime / 0.7) + 0.012 * rpmFraction
-					local chance = p.pops * (p.popRate or 1) * (1 + 1.5 * (p.popBang or 0))
-						* ((0.03 + 0.09 * rpmFraction) * liftEnvelope + 0.35 * cutBurst)
-					if self.rng:NextNumber() < clamp(chance, 0, 0.95) then
-						local size = math.min(1, self.rng:NextNumber() ^ 1.6
-							+ (p.popBang or 0) * (0.5 + 0.5 * self.rng:NextNumber()))
-						self:TriggerPop(size)
-					end
+			local cylinderPhase = ((self.phase - (event.angle or 0)) % cycle) * phaseScale
+			local previousCylinderPhase = self.prevPsi[index] or cylinderPhase
+			self.prevPsi[index] = cylinderPhase
+			local phaseSine = math.sin(cylinderPhase * PI / 180)
+
+			-- A firing event only injects pressure at the actual crank-phase wrap.
+			-- The exhaust pressure then develops over the next ~135 crank degrees.
+			if cylinderPhase < previousCylinderPhase - 360 then
+				self.evoJit[index] = self.rng:NextNumber(0, 3)
+				local shouldFire = (state.running == true or state.starter == true)
+					and state.cut ~= true
+				if overrun and self.rng:NextNumber() > 0.30 then
+					shouldFire = false
+				end
+				local idleMissChance = camOverlap * (1 - load)
+					* (rpm < (p.idleRpm or 700) * 1.25 and 0.04 or 0.008)
+				if shouldFire and self.rng:NextNumber() < idleMissChance then
+					shouldFire = false
+				end
+
+				if shouldFire then
+					local variation = 0.08 + 0.22 * idleRoughness
+						* (1 - load) * (1 - load) + 0.5 * (1 - self.runningMix)
+					local pressure = effectiveLoad * (0.35 + 0.65 * self.runningMix)
+						* (0.3 + 0.7 * rpmTexture)
+					self.p0[index] = pressure
+						* (1 + variation * self.rng:NextNumber(-1, 1))
+				else
+					self.p0[index] = 0
 				end
 			end
-			local fast = self.pulseFast[index] * self.pulseFastDecay
-			local slow = self.pulseSlow[index] * self.pulseSlowDecay
-			local hiss = self.pulseHiss[index] * self.pulseHissDecay
-			self.pulseFast[index] = fast
-			self.pulseSlow[index] = slow
-			self.pulseHiss[index] = hiss
-			local eventPhase = ((self.phase - (event.angle or 0)) % cycle) / cycle
-			local resonant = math.sin(eventPhase * TAU * 2) * slow * 0.018
-			-- A softer pressure pulse plus a small irregular combustion texture.
-			local excitation = fast - slow * 0.22 + resonant
-				+ hiss * self.rng:NextNumber(-1, 1) * 0.075
-			local headerOut = delayProcess(self.headers[index], excitation)
+
+			local jitter = self.evoJit[index] or 0
+			if previousCylinderPhase < pressureStart + jitter
+				and cylinderPhase >= pressureStart + jitter then
+				if self.p0[index] > 0 then
+					self.pe[index] = self.p0[index] * pressureProfile(pressureStart)
+				else
+					self.pe[index] = -0.02 * (1 - 0.6 * effectiveLoad)
+				end
+				self.crack[index] = crackStrength * self.pe[index]
+				self.tick += 0.5
+			end
+
+			local envelope = pressureEnvelope(cylinderPhase - jitter, pulseRise, pressureStart)
+			local pressurePulse = self.pe[index] * envelope
+			self.pe[index] -= pressurePulse * self.kBlow
+
+			local pistonPulse = 0
+			if cylinderPhase > 180 and cylinderPhase < 360 then
+				pistonPulse = envelope * (-phaseSine)
+					* (0.004 + 0.01 * effectiveLoad) * rpmTexture
+			end
+
+			local excitation = pressurePulse + pistonPulse + self.crack[index] * envelope
+			self.crack[index] *= self.crackDecay
+			excitation += self.rng:NextNumber(-1, 1) * envelope
+				* (pressurePulse * 0.22 + 3e-4 * effectiveLoad * rpmTexture)
+
+			local headerOut = delayProcess(self.headers[index], excitation * 9)
 			local bank = (event.collector ~= nil and event.collector or event.bank or 0) + 1
 			if bank <= 1 then
 				bank0 += headerOut
 			else
 				bank1 += headerOut
 			end
+
+			-- A low-order pressure contribution supplies engine-body weight; this is
+			-- driven by cylinder pressure, not a constant bass oscillator.
+			if cylinderPhase < 180 then
+				pressureRumble += self.p0[index] * pressureProfile(cylinderPhase)
+			end
+			if cylinderPhase >= 540 or cylinderPhase < 180 then
+				local pressureAngle = cylinderPhase >= 540 and (720 - cylinderPhase) or cylinderPhase
+				pressureRumble += 0.3 * effectiveLoad * pressureProfile(pressureAngle)
+			end
+
+			-- Intake resonance follows cylinder phase and engine speed. The filter
+			-- below adds a broad acoustic formant instead of a fixed sine tone.
+			local intakeStart = 345 - camShift * 0.7
+			local intakeEnd = 600 + camShift * 0.7
+			intakeTone += raisedSineWindow(cylinderPhase, intakeStart, intakeEnd)
+				* math.max(0, phaseSine) * effectiveLoad * rpmTexture * camScale
 		end
+
+		self.tick *= self.tickDecay
 
 		local rawHeaderLeft = bank0
 		local rawHeaderRight = banks > 1 and bank1 or bank0
-
-		-- Keep the firing-order fundamental in the body, but avoid a strong stack
-		-- of perfectly periodic harmonics (the main cause of the "robot" tone).
-		local crankRadians = self.phase * PI / 180
-		local firingOrder = #p.firing * 360 / math.max(360, cycle)
-		local orderPhase = crankRadians * firingOrder
-		local bedWave = math.sin(orderPhase)
-			+ 0.10 * math.sin(orderPhase * 2 + 0.27)
-		local bedLevel = self.runningMix
-			* (0.013 + 0.010 * math.sqrt(load) + 0.004 * rpmFraction)
-		local engineBed = bedWave * bedLevel
-
-		-- Filter the engine's coloured noise into a subdued low-frequency rumble.
-		-- This fills out the low end without adding another steady oscillator.
-		self.engineRumbleLow += self.engineRumbleLowCoef * (pinkNoise - self.engineRumbleLow)
-		self.engineRumbleSub += self.engineRumbleSubCoef * (self.engineRumbleLow - self.engineRumbleSub)
-		local rumbleTexture = (self.engineRumbleLow - self.engineRumbleSub)
-			* self.runningMix * (1.15 + 1.05 * math.sqrt(load))
-		local bodySource = rawHeaderLeft + rawHeaderRight + engineBed + rumbleTexture
+		local bodySource = rawHeaderLeft + rawHeaderRight
 		local headerLeft = rawHeaderLeft
 		local headerRight = rawHeaderRight
 
-		-- Turbo damping belongs on the exhaust route only; the engine block
-		-- continues to radiate its full mechanical firing energy.
+		-- Turbochargers attenuate the exhaust runner signal, but should not create
+		-- a permanent, high-frequency noise layer across the engine sound.
 		if p.induction == "turbo" then
-			self.turboLp[1] += self.turboLpCoef * (headerLeft - self.turboLp[1])
-			self.turboLp[2] += self.turboLpCoef * (headerRight - self.turboLp[2])
-			headerLeft = self.turboLp[1] * 0.55
-			headerRight = banks > 1 and self.turboLp[2] * 0.55 or headerLeft
+			if banks > 1 then
+				self.turboLp[1] += self.turboLpCoef * (headerLeft - self.turboLp[1])
+				self.turboLp[2] += self.turboLpCoef * (headerRight - self.turboLp[2])
+				headerLeft = self.turboLp[1] * 0.55
+				headerRight = self.turboLp[2] * 0.55
+			else
+				self.turboLp[1] += self.turboLpCoef * (bodySource - self.turboLp[1])
+				headerLeft = self.turboLp[1] * 0.45
+				headerRight = headerLeft
+			end
 		end
 
+		-- Run both exhaust paths for every engine. Even a single-bank engine needs
+		-- slightly different left/right tube lengths to avoid a hard, mono, comb-like tone.
 		local exhaustL = processExhaust(self.chains[1], headerLeft, load)
-		local exhaustR = banks > 1
-			and processExhaust(self.chains[2], headerRight, load)
-			or exhaustL
+		local exhaustR = processExhaust(self.chains[2], headerRight, load)
 
-		-- Intake tract: speed/load-scaled stochastic induction noise through a pipe delay.
-		local intakeNoise = noise * (0.004 + load * 0.026) * (0.12 + rpmFraction * 0.75)
-		self.intakeLp += self.intakeLpCoef * (intakeNoise - self.intakeLp)
-		local intake = (delayProcess(self.intakeLine, self.intakeLp) + self.intakeLp) * intakeMix
-
-		-- Low-frequency block/body resonance must be driven from the header
-		-- pressure pulses, not the already high-passed tailpipe signal.
-		local rawBody = bodySource
-		self.blockLp += self.blockLpCoef * (rawBody - self.blockLp)
-		self.bodyLp[1] += self.bodyLpCoef[1] * (rawBody - self.bodyLp[1])
+		-- Keep the lower body resonance from the cylinder pressure waveform.
+		self.blockLp += self.blockLpCoef * (pressureRumble - self.blockLp)
+		self.bodyLp[1] += self.bodyLpCoef[1] * (bodySource - self.bodyLp[1])
 		self.bodyLp[2] += self.bodyLpCoef[2] * (self.bodyLp[1] - self.bodyLp[2])
-		local bodyOut = self.bodyLp[1] * (0.43 * body)
-			+ self.bodyLp[2] * (0.23 * body)
-			+ self.blockLp * (0.15 * body)
+		local bodyOut = self.bodyLp[2] * (0.55 * body)
+
+		-- A broad intake formant sweeps from bass/midrange to a clearer wail as rpm rises.
+		-- High-redline engines naturally reach a higher formant; low-revving engines do not.
+		self.intakeCounter += 1
+		local redline = math.max(1800, p.redline or 6800)
+		local highRevFactor = clamp((redline - 2500) / 6500, 0, 1)
+		local topFormantHz = 380 + 220 * highRevFactor
+		local targetFormantHz = 220 + (topFormantHz - 220) * clamp(rpm / redline, 0, 1)
+		if self.intakeCounter % 64 == 1
+			or math.abs(targetFormantHz - self.intakeFormantHz) > 45 then
+			self.intakeFormantHz += (targetFormantHz - self.intakeFormantHz) * 0.35
+			setBandpass(self.intakeFormant, sampleRate, self.intakeFormantHz, 1.35)
+		end
+
+		local intakeNoise = pinkNoise * intakeTone
+			* (0.045 + 0.06 * math.sqrt(load))
+		self.intakeLp += self.intakeLpCoef * (intakeNoise - self.intakeLp)
+		local intakeTube = delayProcess(self.intakeLine, self.intakeLp) + self.intakeLp
+		local intakeResonance = processBiquad(self.intakeFormant, intakeTube)
+		local defaultIntakeResonance = 0.24 + 0.28 * highRevFactor
+		local intakeResonanceGain = clamp(p.intakeResonance or defaultIntakeResonance, 0, 1.5)
+		local intake = intakeTube * 0.055 + intakeResonance * intakeResonanceGain * 0.11
+
 
 		-- Procedural afterfire transient with crack, hiss and low thump components.
 		local popNoise = self.rng:NextNumber(-1, 1)
@@ -577,52 +703,129 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		-- Turbo sound: a quiet, smooth fundamental buried under broadband turbine air.
-		-- Avoid a stack of harmonics and periodic wobble, which sounded like a synth.
+		-- Turbo whine stays subtle; the airflow bed carries most of its identity.
+		-- A loud harmonic oscillator was the main source of the synthetic "electric" whistle.
 		boostWhine = 0
 		if superWhine then
 			local frequency = rpm / 60 * 11.2 * (p.whinePitch or 1)
 			local phase = (self.audioTime * frequency) % 1
-			boostWhine = (math.sin(phase * TAU) + 0.12 * math.sin(phase * TAU * 2))
-				* (p.whine or 0) * load * math.pow(math.max(0, rpmFraction), 2) * 0.028
+			boostWhine = (math.sin(phase * TAU) + 0.10 * math.sin(phase * TAU * 2))
+				* (p.whine or 0) * load * math.pow(math.max(0, rpmFraction), 2) * 0.024
 		elseif turboWhine and turbo > 0.015 then
-			local frequency = (310 + 1650 * math.sqrt(turbo) + 140 * rpmFraction) * (p.whinePitch or 1)
+			local frequency = (200 + 3200 * turbo) * (p.whinePitch or 1)
 			self.turboPhase += frequency / sampleRate
 			if self.turboPhase >= 1 then
 				self.turboPhase -= math.floor(self.turboPhase)
 			end
 			local phase = self.turboPhase * TAU
-			local turbineTone = math.sin(phase) + 0.045 * math.sin(phase * 2 + 0.14)
-			local toneLevel = (p.whine or 0.20) * (0.004 + 0.006 * turbo) * math.sqrt(turbo)
-			boostWhine = turbineTone * toneLevel
+			boostWhine = (math.sin(phase) + 0.16 * math.sin(phase * 2 + 0.12))
+				* (p.whine or 0.2) * turbo * turbo * 0.012
 		end
 
 		self.turboNoiseHigh += self.turboNoiseHighCoef * (pinkNoise - self.turboNoiseHigh)
 		self.turboNoiseLow += self.turboNoiseLowCoef * (pinkNoise - self.turboNoiseLow)
+		self.whooshLp += 0.25 * (noise - self.whooshLp)
 		if turboWhine then
+			-- A restrained 350-2200 Hz airflow band, scaled by spool and load.
 			local turbineAir = self.turboNoiseHigh - self.turboNoiseLow
-			boostWhine += turbineAir * turbo * (0.16 + 0.22 * load)
-				* (0.55 + 0.45 * (p.whine or 0.3))
+			boostWhine += turbineAir * turbo * (0.045 + 0.055 * load)
+				* (0.45 + 0.35 * (p.whine or 0.3))
 		end
 
-		-- Filtered airflow burst. Flutter is amplitude-modulated air noise rather
-		-- than a low sine tone, so it sounds like pulsing pressure release.
-		self.bovNoiseHigh += self.bovNoiseHighCoef * (pinkNoise - self.bovNoiseHigh)
-		self.bovNoiseLow += self.bovNoiseLowCoef * (pinkNoise - self.bovNoiseLow)
-		local bovAir = (self.bovNoiseHigh - self.bovNoiseLow) * 2.1
 		local bov = 0
-		if self.bovEnvelope > 0.002 then
-			local flutterRate = clamp(p.flRate or 19, 10, 32) * (0.92 + 0.16 * self.bovEnvelope)
-			self.bovFlutterPhase += flutterRate / sampleRate
-			if self.bovFlutterPhase >= 1 then
-				self.bovFlutterPhase -= math.floor(self.bovFlutterPhase)
+		if p.induction == "turbo" and self.bovEnvelope > 0.002 then
+			local spool = clamp(turbo, 0, 1.2)
+			if p.bov == "flutter" then
+				-- A simple pressure-flow oscillator naturally changes pulse spacing
+				-- as spool and engine load change; the airflow noise is band-limited.
+				local flowScale = math.max(0.12, spool)
+				local halfFlow = 0.5 * flowScale + 0.02
+				local pressureForce = 0.6 * flowScale * flowScale
+				local spring = 0.15 * flowScale * flowScale
+				local flowRatio = self.bovFlow / halfFlow - 1
+				local flowCurve
+				if self.bovFlow >= 0 then
+					flowCurve = spring + pressureForce
+						* (1 + 1.5 * flowRatio - 0.5 * flowRatio * flowRatio * flowRatio)
+				else
+					local ratio = self.bovFlow / halfFlow
+					flowCurve = spring + 0.5 * pressureForce * ratio * ratio
+				end
+				local scale = 1.5 * (0.5 + 0.5 * flowScale)
+				local step = TAU * (p.flRate or 14) * 1.25
+					* (0.35 + 0.65 * flowScale) / sampleRate
+				local damping = (0.06 + 3 * load) * math.sqrt(math.max(0, self.bovPressure))
+				local pressureStep = scale * (flowCurve - self.bovPressure) * step
+				local flowStep = (self.bovFlow - damping) / scale * step
+				self.bovFlow = clamp(self.bovFlow + pressureStep, -3, 3)
+				self.bovPressure = clamp(self.bovPressure + flowStep, -0.5, 3)
+
+				local negativeFlow = math.max(0, -self.bovFlow)
+				local positiveFlow = math.max(0, self.bovFlow)
+				local revTau = negativeFlow > self.bovRev and 0.009 or 0.014
+				self.bovRev += (negativeFlow - self.bovRev)
+					* (1 - math.exp(-1 / (revTau * sampleRate)))
+
+				local stillReleasing = load > 0.2 or spool < 0.06
+				local fadeTau = stillReleasing and 0.06 or 0.01
+				local fadeTarget = stillReleasing and 0 or 1
+				self.surgeFade += (fadeTarget - self.surgeFade)
+					* (1 - math.exp(-1 / (fadeTau * sampleRate)))
+
+				local pressureMix = 0.3 + 0.7 * math.min(1, load * 1.5)
+				local surgeTarget = 0.35 + self.bovRev + positiveFlow * 0.3
+				pressureMix += (surgeTarget - pressureMix) * self.surgeFade
+
+				self.bovFilterCounter += 1
+				if self.bovFilterCounter % 64 == 1 then
+					local centreHz = clamp((p.flPitch or 650) * (0.3 + 0.7 * spool), 170, 2400)
+					setBandpass(self.bovBp, sampleRate, centreHz, 5)
+					setBandpass(self.bovBp2, sampleRate, clamp(p.flPitchEnd or 130, 70, 700), 4)
+				end
+				self.surgePhase += clamp(p.flPitch or 650, 170, 2400)
+					* (0.3 + 0.7 * spool) / sampleRate
+				if self.surgePhase >= 1 then
+					self.surgePhase -= math.floor(self.surgePhase)
+				end
+				local surgeRadians = self.surgePhase * TAU
+				local surgeTone = math.sin(surgeRadians)
+					+ 0.45 * math.sin(surgeRadians * 2)
+					+ 0.20 * math.sin(surgeRadians * 3)
+					+ 0.10 * math.sin(surgeRadians * 4)
+				local ventBase = (self.whooshLp * 0.6 + surgeTone * 0.25 * self.bovRev)
+					* pressureMix * spool * spool
+				local filteredVent = processBiquad(self.bovBp, ventBase) * 4
+				local ventHiss = (noise - self.whooshLp) * pressureMix
+					* spool * spool * 0.6 * (p.flHiss or 0.6)
+				local ventTail = processBiquad(self.bovBp2, math.max(0, -flowStep) * 25 * spool)
+				bov = (filteredVent + ventHiss + ventTail)
+					* math.min(1, self.bovStart / 0.6) * 1.35 * self.surgeFade * (p.flLevel or 0.5)
+			else
+				-- Vent-style valves use a decaying pressure reservoir and broad airflow noise.
+				self.ventP = math.max(0, self.ventP - (0.5 + 2.5 * load) / sampleRate)
+				local openTarget = load < 0.12 and self.ventP > 0.04 and 1 or 0
+				local openTau = openTarget > self.ventV and 0.025 or 0.05
+				self.ventV += (openTarget - self.ventV)
+					* (1 - math.exp(-1 / (openTau * sampleRate)))
+				local jet = self.ventV * math.pow(math.max(0, self.ventP), 0.75)
+				self.jetState += (jet - self.jetState)
+					* (1 - math.exp(-1 / (0.004 * sampleRate)))
+				self.bovFilterCounter += 1
+				if self.bovFilterCounter % 64 == 1 then
+					setBandpass(self.bovBp, sampleRate,
+						clamp(1200 + 3500 * math.sqrt(math.min(1, self.ventP / math.max(0.1, p.boost or 1))), 500, 4200), 0.8)
+				end
+				bov = (processBiquad(self.bovBp, noise) * 2.2
+					+ (noise - self.whooshLp) * 0.35) * self.jetState * 0.62 * (p.flLevel or 0.5)
 			end
-			local pulse = math.max(0, math.sin(self.bovFlutterPhase * TAU))
-			local flutterGate = p.bov == "flutter" and (0.22 + 0.78 * math.pow(pulse, 1.35)) or 1
-			local duration = clamp(p.flDur or 0.36, 0.18, 0.55)
-			bov = bovAir * self.bovEnvelope * (p.flHiss or 0.6)
-				* (p.flLevel or 0.5) * 0.30 * flutterGate
-			self.bovEnvelope *= math.exp(-1 / (duration * sampleRate))
+			self.bovEnvelope *= math.exp(-1 / (0.9 * sampleRate))
+			if self.surgeFade < 0.01 and (load > 0.2 or spool < 0.06)
+				and self.bovEnvelope < 0.01 then
+				self.bovEnvelope = 0
+				self.bovFlow = 0
+				self.bovPressure = 0
+				self.bovRev = 0
+			end
 		end
 
 		-- Gear mesh whine: frequency follows the gearbox input/output shaft and tooth order.
@@ -711,11 +914,20 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			windRight = windCore * (1 + 0.25 * mods.wkR)
 		end
 
-		-- Interior/cabin coloration and short room reflections.
-		local leftRaw = exhaustL * 0.55 + exhaustR * 0.12 + bodyOut + intake * 0.45
-			+ gearTone * 0.65 + ersTone + boostWhine + bov + pop + windLeft + tyre
-		local rightRaw = exhaustR * 0.55 + exhaustL * 0.12 + bodyOut + intake * 0.45
-			+ gearTone * 0.65 + ersTone + boostWhine + bov + pop + windRight + tyre * 0.98
+		-- Reference-style mix: the exhaust is the main voice; the intake/body layers
+		-- supply low-mid weight, and accessories sit around the engine rather than on top.
+		local exhaustWeight = banks > 1 and 0.70 or 0.60
+		local exhaustLeft = (exhaustL * exhaustWeight + exhaustR * (1 - exhaustWeight))
+			* (1 - 0.75 * mic)
+		local exhaustRight = (exhaustR * exhaustWeight + exhaustL * (1 - exhaustWeight))
+			* (1 - 0.75 * mic)
+		local tickSound = self.tick * noise * 0.012 * (1 - rpmFraction) * (1 - rpmFraction)
+		local engineAux = self.blockLp * 1.2 + intake + tickSound
+			+ (headerLeft + headerRight) * 0.02 + gearTone * 0.65
+			+ ersTone + boostWhine + bov + pop
+		local auxiliaryMix = 0.35 + 0.65 * mic
+		local leftRaw = exhaustLeft + engineAux * auxiliaryMix + bodyOut + windLeft + tyre
+		local rightRaw = exhaustRight + engineAux * auxiliaryMix + bodyOut + windRight + tyre * 0.98
 
 		local cabin = clamp(p.cabin or 0, 0, 1)
 		self.cabinLp[1] += cabinCoef * (leftRaw - self.cabinLp[1])
@@ -739,36 +951,38 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			delayProcess(self.tunnelRight, 0)
 		end
 
-		local micMix = 0.35 + 0.65 * mic
-		local engineMix = 1 - 0.75 * mic
-		local master = (p.master or 1) * 1.0
-		local leftSignal = (leftRaw * micMix + exhaustL * engineMix * 0.50) * master
-		local rightSignal = (rightRaw * micMix + exhaustR * engineMix * 0.50) * master
+		local leftSignal = leftRaw
+		local rightSignal = rightRaw
 
-		-- Remove subsonic/DC drift without cutting the exhaust firing fundamental.
+		-- Mild DC blocking: keep the low engine modes while removing buffer drift.
 		local leftDc = leftSignal - self.dcInput[1] + 0.998 * self.dcOutput[1]
 		local rightDc = rightSignal - self.dcInput[2] + 0.998 * self.dcOutput[2]
 		self.dcInput[1], self.dcInput[2] = leftSignal, rightSignal
 		self.dcOutput[1], self.dcOutput[2] = leftDc, rightDc
-		-- Keep the exhaust as the dominant engine source; accessories are mixed
-		-- around it rather than competing with it.
-		local peak = math.max(math.abs(leftDc), math.abs(rightDc))
-		local followerCoef = peak > self.levelFollower
-			and self.levelAttackCoef or self.levelReleaseCoef
-		self.levelFollower += followerCoef * (peak - self.levelFollower)
 
-		-- Gentle peak control keeps the first throttle transient from jumping
-		-- far above idle while preserving the natural rise in engine load.
-		local targetGain = 1
-		if self.levelFollower > 0.24 then
-			targetGain = clamp((0.24 / self.levelFollower) ^ 0.55, 0.52, 1)
+		-- Soft, envelope-following output limiting inspired by the reference audio engine.
+		-- A fixed saturator was exaggerating sharp edges and adding more "robot" harmonics.
+		local master = p.master or 1
+		local clipAmount = clamp(p.clip or 0.15, 0, 1)
+		local function outputLimit(signal, channel)
+			if clipAmount <= 0 then
+				return tanh(signal * master * 2.6)
+			end
+			local magnitude = math.abs(signal)
+			local envelope = self.clipEnv[channel]
+			if magnitude > envelope then
+				envelope += (magnitude - envelope) * 0.02
+			else
+				envelope += (magnitude - envelope) * 0.0003
+			end
+			self.clipEnv[channel] = math.max(0, envelope)
+			local peak = math.max(0.001, envelope)
+			local ceiling = peak * (1 - 0.8 * clipAmount)
+			local limited = clamp(signal, -ceiling, ceiling) * math.pow(peak / ceiling, 0.8)
+			return tanh(limited * master * 2.6)
 		end
-		local gainCoef = targetGain < self.compressorGain
-			and self.compressorAttackCoef or self.compressorReleaseCoef
-		self.compressorGain += gainCoef * (targetGain - self.compressorGain)
-
-		local leftOut = softClip(leftDc * self.compressorGain * 1.06, 1.20)
-		local rightOut = softClip(rightDc * self.compressorGain * 1.06, 1.20)
+		local leftOut = outputLimit(leftDc, 1)
+		local rightOut = outputLimit(rightDc, 2)
 
 		buffer.writef32(left, sample * 4, leftOut)
 		buffer.writef32(right, sample * 4, rightOut)
