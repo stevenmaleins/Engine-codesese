@@ -317,8 +317,8 @@ function SoundSynthesis.new(params, sampleRate)
 		popVoices = {},
 		popEnvelope = 0,
 		popThumpEnvelope = 0,
-		popPhase = 0,
-		popPhaseFrequency = 80,
+		popLow = 0,
+		popLowCoef = coefficient(sampleRate, 190),
 		bovEnvelope = 0,
 		bovPhase = 0,
 		bovFlutterPhase = 0,
@@ -374,7 +374,6 @@ function SoundSynthesis:TriggerPop(size)
 
 	self.popEnvelope = math.max(self.popEnvelope, size * (p.popThump or 1))
 	self.popThumpEnvelope = math.min(0.6, self.popThumpEnvelope + size * (p.popWhump or 0.1) * 0.08)
-	self.popPhaseFrequency = (55 + 50 * (1 - size)) * math.sqrt(p.popPitch or 1)
 end
 
 function SoundSynthesis:_CheckEvents(state)
@@ -382,18 +381,25 @@ function SoundSynthesis:_CheckEvents(state)
 	local throttle = state.requestedThrottle or state.throttle or 0
 	local rpm = state.rpm or 0
 
-	-- Throttle-lift afterfire and turbo blow-off are edge-triggered once per audio block.
-	if self.previousThrottle > 0.3 and throttle < 0.05 and rpm > (p.idleRpm or 700) * 1.6 then
-		if (p.pops or 0) > 0 then
-			self:TriggerPop(clamp(0.35 + (p.popBang or 0) * 0.4, 0, 1))
+	-- Lift-off pops are optional tuning, not a mandatory one-shot on every engine.
+	-- Both their chance and size follow the preset's pop/bang settings.
+	if self.previousThrottle > 0.3 and throttle < 0.05
+		and rpm > (p.idleRpm or 700) * 1.6 then
+		local popAmount = clamp(p.pops or 0, 0, 1)
+		local popBang = clamp(p.popBang or 0, 0, 1)
+		local popChance = clamp(popAmount * 0.55 + popBang * 0.45, 0, 1)
+		if popChance > 0 and self.rng:NextNumber() < popChance then
+			local popStrength = clamp(0.12 + popAmount * 0.35 + popBang * 0.38, 0, 0.75)
+			self:TriggerPop(popStrength)
 		end
 	end
 
 	local boost = state.boost or 0
 	local boostDrop = self.previousBoost - boost
 	local throttleLift = self.previousThrottle > 0.30 and throttle < 0.05
+	local separateBoostDump = boostDrop > 0.12 and self.bovEnvelope < 0.03
 	if p.induction == "turbo" and p.bov ~= "none"
-		and (boostDrop > 0.07 or throttleLift) then
+		and (throttleLift or separateBoostDump) then
 		local boostAmount = clamp(self.previousBoost / math.max(0.35, p.boost or 1), 0, 1)
 		local spool = clamp(state.turbo or self.soundTurbo or 0, 0, 1.2)
 		if boostAmount > 0.04 then
@@ -478,6 +484,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 	local superWhine = p.induction == "super" and (p.whine or 0) > 0
 	local turboWhine = p.induction == "turbo" and (p.whine or 0) > 0
 	local cabinCoef = coefficient(sampleRate, 12000 - 8500 * clamp(p.cabin or 0, 0, 1))
+	local reportedThrottle = type(state.throttle) == "number" and clamp(state.throttle, 0, 1) or nil
 
 	for sample = 0, frameCount - 1 do
 		local alpha = alphaStart + (alphaEnd - alphaStart) * ((sample + 1) / frameCount)
@@ -499,6 +506,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local liftTime = math.max(0, liftFrom + (liftTo - liftFrom) * alpha)
 		local cutBurst = math.max(0, cutBurstFrom + (cutBurstTo - cutBurstFrom) * alpha)
 		local throttle = throttleFrom + (throttleTo - throttleFrom) * alpha
+		local physicalThrottle = reportedThrottle or throttle
 		local gear = state.gear or 0
 		local gearRatio = gear > 0 and (p.gears[gear] or 1) or 1
 		local kmh = speed * 3.6
@@ -520,6 +528,15 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local pressureRumble = 0
 		local intakeTone = 0
 		local effectiveLoad = 0.3 + 0.7 * load
+		local idleRpm = p.idleRpm or 700
+		local closedThrottle = clamp((0.10 - throttle) / 0.10, 0, 1)
+		local overrunAmount = closedThrottle
+			* clamp((rpm - idleRpm * 1.25) / (idleRpm * 0.55), 0, 1)
+		-- Fuel-cut reduces combustion and intake energy, while mechanical pumping
+		-- still leaves a softer low-frequency deceleration texture.
+		local combustionLoad = effectiveLoad * (1 - 0.94 * overrunAmount)
+		local mechanicalLoad = effectiveLoad * (1 - 0.52 * overrunAmount)
+		local intakeLoad = effectiveLoad * (1 - 0.85 * overrunAmount)
 		local rpmTexture = clamp(rpm / 2500, 0, 1)
 		local hiCam = state.hiCam == true
 		local pressureStart = hiCam and 112 or 135
@@ -533,7 +550,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			0.006 * math.max(300, rpm) / (1 + 2 * blowdownAmount)
 		)
 		local crackStrength = 3 * math.sqrt(blowdownAmount)
-		local overrun = load < 0.03 and rpm > (p.idleRpm or 700) * 1.4
+		local overrun = overrunAmount > 0.88
 		local idleRoughness = clamp(p.idleRough or 1, 0, 3)
 		local camOverlap = clamp(p.camOverlap or 0, 0, 1)
 
@@ -549,7 +566,9 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.evoJit[index] = self.rng:NextNumber(0, 3)
 				local shouldFire = (state.running == true or state.starter == true)
 					and state.cut ~= true
-				if overrun and self.rng:NextNumber() > 0.30 then
+				-- Real overrun fuel-cut is consistent, not a random 70% misfire.
+				-- Sparse afterfire is handled separately by the preset-controlled pop model.
+				if overrun then
 					shouldFire = false
 				end
 				local idleMissChance = camOverlap * (1 - load)
@@ -561,7 +580,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				if shouldFire then
 					local variation = 0.08 + 0.22 * idleRoughness
 						* (1 - load) * (1 - load) + 0.5 * (1 - self.runningMix)
-					local pressure = effectiveLoad * (0.35 + 0.65 * self.runningMix)
+					local pressure = combustionLoad * (0.35 + 0.65 * self.runningMix)
 					self.p0[index] = pressure
 						* (1 + variation * self.rng:NextNumber(-1, 1))
 				else
@@ -588,13 +607,13 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local pistonPulse = 0
 			if cylinderPhase > 180 and cylinderPhase < 360 then
 				pistonPulse = envelope * (-phaseSine)
-					* (0.004 + 0.01 * effectiveLoad) * rpmTexture
+					* (0.004 + 0.01 * mechanicalLoad) * rpmTexture
 			end
 
 			local excitation = pressurePulse + pistonPulse + self.crack[index] * envelope
 			self.crack[index] *= self.crackDecay
 			excitation += self.rng:NextNumber(-1, 1) * envelope
-				* (pressurePulse * 0.22 + 3e-4 * effectiveLoad * rpmTexture)
+				* (pressurePulse * 0.22 + 3e-4 * combustionLoad * rpmTexture)
 
 			local headerOut = delayProcess(self.headers[index], excitation * 9)
 			local bank = (event.collector ~= nil and event.collector or event.bank or 0) + 1
@@ -610,7 +629,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				pressureRumble += self.p0[index] * pressureProfile(cylinderPhase)
 			end
 			if cylinderPhase >= 540 then
-				pressureRumble += 0.3 * effectiveLoad
+				pressureRumble += 0.3 * mechanicalLoad
 					* pressureProfile(720 - cylinderPhase)
 			end
 
@@ -619,7 +638,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local intakeStart = 345 - camShift * 0.7
 			local intakeEnd = 600 + camShift * 0.7
 			intakeTone += raisedSineWindow(cylinderPhase, intakeStart, intakeEnd)
-				* math.max(0, phaseSine) * effectiveLoad * rpmTexture * camScale
+				* math.max(0, phaseSine) * intakeLoad * rpmTexture * camScale
 		end
 
 		self.tick *= self.tickDecay
@@ -687,12 +706,12 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 
 		-- Procedural afterfire transient with crack, hiss and low thump components.
 		local popNoise = self.rng:NextNumber(-1, 1)
-		local pop = popNoise * self.popEnvelope * 0.045
-		self.popEnvelope *= math.exp(-1 / (0.018 * sampleRate))
-		self.popThumpEnvelope *= math.exp(-1 / (0.045 * sampleRate))
-		self.popPhase += self.popPhaseFrequency / sampleRate
-		if self.popPhase >= 1 then self.popPhase -= 1 end
-		pop += self.popThumpEnvelope * math.sin(self.popPhase * TAU) * 0.22
+		self.popLow += self.popLowCoef * (popNoise - self.popLow)
+		local pop = (popNoise - self.popLow) * self.popEnvelope * 0.035
+		self.popEnvelope *= math.exp(-1 / (0.014 * sampleRate))
+		self.popThumpEnvelope *= math.exp(-1 / (0.032 * sampleRate))
+		-- Low thump is coloured noise, not a fixed 55-105 Hz oscillator.
+		pop += self.popLow * self.popThumpEnvelope * 0.30
 		for voiceIndex = #self.popVoices, 1, -1 do
 			local voice = self.popVoices[voiceIndex]
 			if voice.wait > 0 then
@@ -766,7 +785,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				local scale = 1.5 * (0.5 + 0.5 * flowScale)
 				local step = TAU * (p.flRate or 14) * 1.25
 					* (0.35 + 0.65 * flowScale) / sampleRate
-				local damping = (0.06 + 3 * load) * math.sqrt(math.max(0, self.bovPressure))
+				local damping = (0.06 + 3 * physicalThrottle) * math.sqrt(math.max(0, self.bovPressure))
 				local pressureStep = scale * (flowCurve - self.bovPressure) * step
 				local flowStep = (self.bovFlow - damping) / scale * step
 				self.bovFlow = clamp(self.bovFlow + pressureStep, -3, 3)
@@ -778,8 +797,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.bovRev += (negativeFlow - self.bovRev)
 					* (1 - math.exp(-1 / (revTau * sampleRate)))
 
-				local stillReleasing = load > 0.2 or spool < 0.06
-				local fadeTau = stillReleasing and 0.06 or 0.01
+				-- Use the actual throttle edge for release timing. Smoothed engine load
+				-- lags behind the pedal and made the flutter start late or disappear.
+				local stillReleasing = physicalThrottle > 0.12 or spool < 0.06
+				local fadeTau = stillReleasing and 0.018 or 0.004
 				local fadeTarget = stillReleasing and 0 or 1
 				self.surgeFade += (fadeTarget - self.surgeFade)
 					* (1 - math.exp(-1 / (fadeTau * sampleRate)))
@@ -791,31 +812,33 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.bovFilterCounter += 1
 				if self.bovFilterCounter % 64 == 1 then
 					local centreHz = clamp((p.flPitch or 650) * (0.3 + 0.7 * spool), 170, 2400)
-					setBandpass(self.bovBp, sampleRate, centreHz, 5)
-					setBandpass(self.bovBp2, sampleRate, clamp(p.flPitchEnd or 130, 70, 700), 4)
+					setBandpass(self.bovBp, sampleRate, centreHz, 2.0)
+					setBandpass(self.bovBp2, sampleRate, clamp(p.flPitchEnd or 130, 70, 700), 2.5)
 				end
-				self.surgePhase += clamp(p.flPitch or 650, 170, 2400)
-					* (0.3 + 0.7 * spool) / sampleRate
+				-- Flutter rate controls the repetition of noisy compressor-surging puffs;
+				-- no pitched harmonic stack is added to the airflow itself.
+				self.surgePhase += clamp(p.flRate or 14, 5, 28)
+					* (0.65 + 0.7 * spool) / sampleRate
 				if self.surgePhase >= 1 then
 					self.surgePhase -= math.floor(self.surgePhase)
 				end
-				local surgeRadians = self.surgePhase * TAU
-				local surgeTone = math.sin(surgeRadians)
-					+ 0.45 * math.sin(surgeRadians * 2)
-					+ 0.20 * math.sin(surgeRadians * 3)
-					+ 0.10 * math.sin(surgeRadians * 4)
-				local ventBase = (self.whooshLp * 0.6 + surgeTone * 0.25 * self.bovRev)
+				local pulse = math.max(0, math.sin(self.surgePhase * TAU))
+				pulse *= pulse
+				local surgeNoise = pinkNoise - self.turboNoiseLow
+				local flowGate = 0.35 + 0.65 * math.min(1, self.bovRev * 2 + 0.12)
+				local ventBase = (self.whooshLp * 0.35
+					+ surgeNoise * (0.18 + 0.95 * pulse) * flowGate)
 					* pressureMix * spool * spool
-				local filteredVent = processBiquad(self.bovBp, ventBase) * 4
+				local filteredVent = processBiquad(self.bovBp, ventBase) * 2.2
 				local ventHiss = (noise - self.whooshLp) * pressureMix
-					* spool * spool * 0.6 * (p.flHiss or 0.6)
+					* spool * spool * (0.32 + 0.48 * pulse) * (p.flHiss or 0.6)
 				local ventTail = processBiquad(self.bovBp2, math.max(0, -flowStep) * 25 * spool)
 				bov = (filteredVent + ventHiss + ventTail)
-					* math.min(1, self.bovStart / 0.6) * 1.35 * self.surgeFade * (p.flLevel or 0.5)
+					* math.min(1, self.bovStart / 0.6) * 1.10 * self.surgeFade * (p.flLevel or 0.5)
 			else
 				-- Vent-style valves use a decaying pressure reservoir and broad airflow noise.
 				self.ventP = math.max(0, self.ventP - (0.5 + 2.5 * load) / sampleRate)
-				local openTarget = load < 0.12 and self.ventP > 0.04 and 1 or 0
+				local openTarget = physicalThrottle < 0.12 and self.ventP > 0.04 and 1 or 0
 				local openTau = openTarget > self.ventV and 0.025 or 0.05
 				self.ventV += (openTarget - self.ventV)
 					* (1 - math.exp(-1 / (openTau * sampleRate)))
@@ -830,7 +853,13 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				bov = (processBiquad(self.bovBp, noise) * 2.2
 					+ (noise - self.whooshLp) * 0.35) * self.jetState * 0.62 * (p.flLevel or 0.5)
 			end
-			self.bovEnvelope *= math.exp(-1 / (0.9 * sampleRate))
+			-- Give the release a real amplitude envelope; previously this value only
+			-- kept the branch alive while the sound stayed at nearly constant level.
+			local releaseEnvelope = clamp(
+				self.bovEnvelope / math.max(0.05, self.bovStart), 0, 1
+			)
+			bov *= releaseEnvelope
+			self.bovEnvelope *= math.exp(-1 / (0.28 * sampleRate))
 			if self.surgeFade < 0.01 and (load > 0.2 or spool < 0.06)
 				and self.bovEnvelope < 0.01 then
 				self.bovEnvelope = 0
