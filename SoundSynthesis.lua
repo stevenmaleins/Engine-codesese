@@ -790,10 +790,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 
 			local turbineBand = processBiquad(self.turboAirFilter, pinkNoise)
 			local turbineAir = self.turboNoiseHigh - self.turboNoiseLow
-			local airflowBed = (turbineBand * 0.25 + turbineAir * 0.12)
+			local airflowBed = (turbineBand * 0.15 + turbineAir * 0.07)
 				* airflowDrive * (0.55 + 0.45 * load)
 			local spoolRush = (noise - self.whooshLp) * self.turboRiseEnv
-				* turbo * (0.05 + 0.06 * boostFraction)
+				* turbo * (0.03 + 0.035 * boostFraction)
 			boostWhine += airflowBed + spoolRush
 
 			if turboWhine and turbo > 0.015 then
@@ -813,8 +813,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				local toneDrive = math.pow(turbo, 1.25)
 					* math.pow(0.08 + 0.92 * load, 0.75)
 					* (p.whine or 0)
+				-- Keep the pitched compressor whistle behind the combustion/exhaust voice.
+				-- The airflow bed and BOV flutter remain separate, less tonal layers.
 				boostWhine += (math.sin(phase) + 0.10 * math.sin(phase * 2 + 0.16))
-					* toneDrive * 0.015
+					* toneDrive * 0.0045
 			end
 		end
 
@@ -939,10 +941,11 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local inputShare = clamp(p.gearWhineIn or 0.3, 0, 1)
 			local sourceHz = meshHz * (1 - 0.25 * inputShare)
 				+ inputMeshHz * (0.25 * inputShare)
-			-- Real gear mesh is a tonal, speed-linked whine; keep it in the upper-mid band.
-			local targetHz = clamp(850 + math.sqrt(math.max(0, sourceHz)) * 32, 1400, 3400)
+			-- Give the whine a lower starting register and a smoother rise with shaft speed.
+			-- Removing the 1.4 kHz floor avoids a pinched, high-pitched sound at low rpm.
+			local targetHz = clamp(760 + math.sqrt(math.max(0, sourceHz)) * 28, 900, 2400)
 			self.gearWhineHz += (targetHz - self.gearWhineHz)
-				* (1 - math.exp(-1 / (0.022 * sampleRate)))
+				* (1 - math.exp(-1 / (0.032 * sampleRate)))
 			self.gearWhineCounter += 1
 			if self.gearWhineCounter % 64 == 1 then
 				setBandpass(self.gearWhineFilter, sampleRate, self.gearWhineHz, 2.0)
