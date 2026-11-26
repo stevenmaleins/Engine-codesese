@@ -816,8 +816,9 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.bovRev += (negativeFlow - self.bovRev)
 					* (1 - math.exp(-1 / (revTau * sampleRate)))
 
-				-- The original model fades surge out under load and back in after lift-off.
-				local stillReleasing = load > 0.2 or flowScale < 0.06
+				-- Follow the actual pedal command for release fade. Load is block-interpolated,
+				-- so it can still contain pre-lift values at the start of this audio block.
+				local stillReleasing = throttle > 0.2 or flowScale < 0.06
 				local fadeTau = stillReleasing and 0.06 or 0.01
 				local fadeTarget = stillReleasing and 0 or 1
 				self.surgeFade += (fadeTarget - self.surgeFade)
@@ -855,9 +856,16 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 					* flowScale * flowScale * 0.6 * (p.flHiss or 0.6)
 				local ventTail = processBiquad(self.bovBp2,
 					math.max(0, -flowStep) * 25 * flowScale)
+				-- Keep the release alive through the block boundary, then let its
+				-- own preset duration shape the audible flutter tail.
+				local flutterEnvelope = clamp(
+					self.bovEnvelope / math.max(0.05, self.bovStart), 0, 1
+				)
 				bov = (filteredVent + ventHiss + ventTail)
 					* math.min(1, self.bovStart / 0.6) * 1.8
-					* self.surgeFade * (p.flLevel or 0.5)
+					* self.surgeFade * flutterEnvelope * (p.flLevel or 0.5)
+				local flutterDuration = math.max(0.12, p.flDur or 0.34)
+				self.bovEnvelope *= math.exp(-1 / (flutterDuration * sampleRate))
 			else
 				-- Vent-style valves use a decaying pressure reservoir and broad airflow noise.
 				self.ventP = math.max(0, self.ventP - (0.5 + 2.5 * load) / sampleRate)
@@ -877,12 +885,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				bov = (processBiquad(self.bovBp, noise) * 1.85
 					+ (noise - self.whooshLp) * 0.27) * self.jetState * 0.62 * (p.flLevel or 0.5)
 			end
-			-- Vent-style releases use their own decay. Compressor flutter instead
-			-- follows the reference worklet's load/spool-driven surgeFade envelope.
+			-- Vent-style releases use their own decay. Compressor flutter has a
+			-- bounded release envelope, so a pre-lift audio sample cannot erase it.
 			if p.bov == "flutter" then
-				-- Match the reference envelope: surgeFade shapes the sound, and the
-				-- event is cleared when load/spool has faded the surge away.
-				if self.surgeFade < 0.02 and (load > 0.2 or spool < 0.06) then
+				if self.bovEnvelope < 0.01 then
 					self.bovEnvelope = 0
 					self.bovFlow = 0
 					self.bovPressure = 0
