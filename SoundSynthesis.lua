@@ -291,7 +291,9 @@ function SoundSynthesis.new(params, sampleRate)
 		gearWhineFilter = newBiquad(),
 		gearWhineHz = 600,
 		gearWhinePhase = 0,
+		gearWhineAltPhase = 0,
 		gearWhineMix = 0,
+		gearWhineGearGain = 0.16,
 		gearWhineCounter = 0,
 		headers = headers,
 		chains = chains,
@@ -790,10 +792,12 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 
 			local turbineBand = processBiquad(self.turboAirFilter, pinkNoise)
 			local turbineAir = self.turboNoiseHigh - self.turboNoiseLow
-			local airflowBed = (turbineBand * 0.15 + turbineAir * 0.07)
+			-- Keep the always-on compressor bed well behind the engine.
+			-- The separate BOV section below retains the audible lift-off flutter.
+			local airflowBed = (turbineBand * 0.035 + turbineAir * 0.016)
 				* airflowDrive * (0.55 + 0.45 * load)
 			local spoolRush = (noise - self.whooshLp) * self.turboRiseEnv
-				* turbo * (0.03 + 0.035 * boostFraction)
+				* turbo * (0.008 + 0.009 * boostFraction)
 			boostWhine += airflowBed + spoolRush
 
 			if turboWhine and turbo > 0.015 then
@@ -816,7 +820,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				-- Keep the pitched compressor whistle behind the combustion/exhaust voice.
 				-- The airflow bed and BOV flutter remain separate, less tonal layers.
 				boostWhine += (math.sin(phase) + 0.10 * math.sin(phase * 2 + 0.16))
-					* toneDrive * 0.0045
+					* toneDrive * 0.0025
 			end
 		end
 
@@ -926,11 +930,19 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		-- Straight-cut gearbox whine: the tooth-mesh tone is now the main voice.
-		-- A small band-limited texture keeps it mechanical without turning it into hiss.
+		-- Straight-cut gearbox whine: keep one continuous shaft-linked voice,
+		-- with a very lightly detuned layer for a less synthetic, less brittle tone.
 		local gearTone = 0
 		local targetGearWhineMix = 0
-		if gearWhine > 0 and gear > 0 and omegaIn > 1 then
+		local gearCount = type(p.gears) == "table" and #p.gears or 1
+		local gearPosition = gearCount > 1
+			and clamp((gear - 1) / (gearCount - 1), 0, 1) or 0
+		local targetGearGain = gear > 0
+			and (0.16 + 0.84 * math.pow(gearPosition, 1.15)) or 0.16
+
+		-- A road-speed gate prevents a gearbox tone from leaking into idle,
+		-- even when the transmission is in first gear with the clutch engaged.
+		if gearWhine > 0 and gear > 0 and omegaIn > 1 and kmh > 2 then
 			local outputHz = (omegaIn / gearRatio) / TAU
 			local inputHz = omegaIn / TAU
 			local order = (p.gearWhineTeeth and p.gearWhineTeeth[gear])
@@ -941,37 +953,47 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local inputShare = clamp(p.gearWhineIn or 0.3, 0, 1)
 			local sourceHz = meshHz * (1 - 0.25 * inputShare)
 				+ inputMeshHz * (0.25 * inputShare)
-			-- Give the whine a lower starting register and a smoother rise with shaft speed.
-			-- Removing the 1.4 kHz floor avoids a pinched, high-pitched sound at low rpm.
+			-- Keep the last accepted pitch range; smooth the transitions across RPM and shifts.
 			local targetHz = clamp(760 + math.sqrt(math.max(0, sourceHz)) * 28, 900, 2400)
 			self.gearWhineHz += (targetHz - self.gearWhineHz)
-				* (1 - math.exp(-1 / (0.032 * sampleRate)))
+				* (1 - math.exp(-1 / (0.045 * sampleRate)))
 			self.gearWhineCounter += 1
 			if self.gearWhineCounter % 64 == 1 then
 				setBandpass(self.gearWhineFilter, sampleRate, self.gearWhineHz, 2.0)
 			end
+
 			self.gearWhinePhase += self.gearWhineHz / sampleRate
 			if self.gearWhinePhase >= 1 then
 				self.gearWhinePhase -= math.floor(self.gearWhinePhase)
 			end
+			self.gearWhineAltPhase += (self.gearWhineHz * 1.002) / sampleRate
+			if self.gearWhineAltPhase >= 1 then
+				self.gearWhineAltPhase -= math.floor(self.gearWhineAltPhase)
+			end
+
 			local phase = self.gearWhinePhase * TAU
-			local meshTone = math.sin(phase)
+			local meshTone = math.sin(phase) * 0.86
+				+ math.sin(self.gearWhineAltPhase * TAU) * 0.14
 			local meshHarmonic = math.sin(phase * 2 + 0.13)
 			local gearNoise = processBiquad(self.gearWhineFilter, pinkNoise)
 			local torqueFactor = clamp(math.abs(shaftTorque) / math.max(1, p.peakTorque), 0, 1.5)
 			local loadMix = 0.55 + 0.45 * clamp(torqueFactor, 0, 1)
-			local speedMix = clamp((inputHz - 8) / 55, 0, 1)
-			targetGearWhineMix = speedMix
-			gearTone = gearWhine * loadMix * speedMix
-				* (gearNoise * (0.12 + 0.035 * inputShare)
+			-- Use vehicle road speed for fade-in; engine RPM alone caused audible whine at idle.
+			targetGearWhineMix = clamp((kmh - 2) / 13, 0, 1)
+			gearTone = gearWhine * loadMix
+				* (gearNoise * (0.045 + 0.012 * inputShare)
 					+ meshTone * (0.22 + 0.08 * inputShare)
-					+ meshHarmonic * (0.045 + 0.02 * inputShare))
+					+ meshHarmonic * (0.018 + 0.008 * inputShare))
 		end
-		local gearMixTau = targetGearWhineMix > self.gearWhineMix and 0.025 or 0.065
+
+		local gearMixTau = targetGearWhineMix > self.gearWhineMix and 0.055 or 0.14
 		self.gearWhineMix += (targetGearWhineMix - self.gearWhineMix)
 			* (1 - math.exp(-1 / (gearMixTau * sampleRate)))
-		gearTone *= self.gearWhineMix
-		gearTone *= 1.15
+		local gearGainTau = targetGearGain > self.gearWhineGearGain and 0.10 or 0.16
+		self.gearWhineGearGain += (targetGearGain - self.gearWhineGearGain)
+			* (1 - math.exp(-1 / (gearGainTau * sampleRate)))
+		-- Lower overall level; first gear is deliberately much quieter than the top gear.
+		gearTone *= self.gearWhineMix * self.gearWhineGearGain * 0.52
 		local ersTone = 0
 		if (p.mguk or 0) > 0 then
 			local ersFrequency = rpm * 0.16
