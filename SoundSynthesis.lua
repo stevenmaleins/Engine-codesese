@@ -257,6 +257,11 @@ function SoundSynthesis.new(params, sampleRate)
 		turboNoiseLow = 0,
 		turboNoiseHighCoef = coefficient(sampleRate, 2200),
 		turboNoiseLowCoef = coefficient(sampleRate, 350),
+		turboAirFilter = newBiquad(),
+		turboAirFilterHz = 900,
+		turboAirCounter = 0,
+		turboWhineHz = 700,
+		turboRiseEnv = 0,
 		prevPsi = table.create(math.max(1, #firing), 0),
 		p0 = table.create(math.max(1, #firing), 0),
 		pe = table.create(math.max(1, #firing), 0),
@@ -330,6 +335,7 @@ function SoundSynthesis.new(params, sampleRate)
 		previousThrottle = 0,
 		previousBoost = 0,
 		previousGear = 0,
+		previousShifting = false,
 		previousSpeed = 0,
 		previousState = nil,
 		blockCounter = 0,
@@ -402,14 +408,21 @@ function SoundSynthesis:_CheckEvents(state)
 	local boost = state.boost or 0
 	local boostDrop = self.previousBoost - boost
 	local throttleLift = self.previousThrottle > 0.30 and throttle < 0.05
-	local separateBoostDump = boostDrop > 0.12 and self.bovEnvelope < 0.03
-	if p.induction == "turbo" and p.bov ~= "none"
-		and (throttleLift or separateBoostDump) then
+	local shiftActive = state.shifting == true
+	local shiftStarted = shiftActive and not self.previousShifting
+	local boostDumpThreshold = math.max(0.06, (p.boost or 1) * 0.07)
+	local separateBoostDump = boostDrop > boostDumpThreshold and self.bovEnvelope < 0.08
+	local releaseEvent = throttleLift or ((separateBoostDump or shiftStarted) and self.bovEnvelope < 0.08)
+	if p.induction == "turbo" and p.bov ~= "none" and releaseEvent then
 		local boostAmount = clamp(self.previousBoost / math.max(0.35, p.boost or 1), 0, 1)
+		-- Shifts vent a little less aggressively than a full pedal lift.
+		if shiftStarted and not throttleLift then
+			boostAmount *= 0.72
+		end
 		local spool = clamp(state.turbo or self.soundTurbo or 0, 0, 1.2)
 		if boostAmount > 0.04 then
 			self.bovEnvelope = math.max(self.bovEnvelope, boostAmount)
-			self.bovStart = boostAmount
+			self.bovStart = math.max(0.05, boostAmount)
 			self.bovFlow = math.max(self.bovFlow, math.max(0.1, spool))
 			self.bovPressure = math.max(self.bovPressure, 1.29 * spool * spool)
 			self.bovRev = 0
@@ -423,6 +436,7 @@ function SoundSynthesis:_CheckEvents(state)
 	self.previousThrottle = throttle
 	self.previousBoost = boost
 	self.previousGear = state.gear or 0
+	self.previousShifting = shiftActive
 	self.previousSpeed = state.speed or 0
 end
 
@@ -503,9 +517,14 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local boost = math.max(0, boostFrom + (boostTo - boostFrom) * alpha)
 		local turboTarget = math.max(0, turboFrom + (turboTo - turboFrom) * alpha)
 		local turboTau = turboTarget > self.soundTurbo and 0.060 or 0.17
+		local previousSoundTurbo = self.soundTurbo
 		self.soundTurbo += (turboTarget - self.soundTurbo)
 			* (1 - math.exp(-1 / (turboTau * sampleRate)))
 		local turbo = self.soundTurbo
+		local spoolRiseTarget = clamp((turbo - previousSoundTurbo) * sampleRate / 32, 0, 1)
+		local spoolRiseTau = spoolRiseTarget > self.turboRiseEnv and 0.008 or 0.055
+		self.turboRiseEnv += (spoolRiseTarget - self.turboRiseEnv)
+			* (1 - math.exp(-1 / (spoolRiseTau * sampleRate)))
 		local omegaIn = math.max(0, omegaInFrom + (omegaInTo - omegaInFrom) * alpha)
 		local shaftTorque = shaftFrom + (shaftTo - shaftFrom) * alpha
 		local liftTime = math.max(0, liftFrom + (liftTo - liftFrom) * alpha)
@@ -739,33 +758,64 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		-- Turbo whine stays subtle; the airflow bed carries most of its identity.
-		-- A loud harmonic oscillator was the main source of the synthetic "electric" whistle.
+		-- Induction tone, compressor airflow and spool-up are separate voices.
+		-- Airflow responds to load/boost on every turbo preset; p.whine only enables the pitched whistle.
 		boostWhine = 0
 		if superWhine then
 			local frequency = rpm / 60 * 11.2 * (p.whinePitch or 1)
 			local phase = (self.audioTime * frequency) % 1
 			boostWhine = (math.sin(phase * TAU) + 0.10 * math.sin(phase * TAU * 2))
 				* (p.whine or 0) * load * math.pow(math.max(0, rpmFraction), 2) * 0.024
-		elseif turboWhine and turbo > 0.015 then
-			local frequency = (200 + 3200 * turbo) * (p.whinePitch or 1)
-			self.turboPhase += frequency / sampleRate
-			if self.turboPhase >= 1 then
-				self.turboPhase -= math.floor(self.turboPhase)
-			end
-			local phase = self.turboPhase * TAU
-			boostWhine = (math.sin(phase) + 0.16 * math.sin(phase * 2 + 0.12))
-				* (p.whine or 0.2) * turbo * turbo * 0.012
 		end
 
 		self.turboNoiseHigh += self.turboNoiseHighCoef * (pinkNoise - self.turboNoiseHigh)
 		self.turboNoiseLow += self.turboNoiseLowCoef * (pinkNoise - self.turboNoiseLow)
 		self.whooshLp += 0.25 * (noise - self.whooshLp)
-		if turboWhine then
-			-- A restrained 350-2200 Hz airflow band, scaled by spool and load.
+
+		if p.induction == "turbo" then
+			local boostFraction = clamp(boost / math.max(0.15, p.boost or 1), 0, 1)
+			local airflowDrive = turbo * (0.18 + 0.82 * load)
+				* (0.25 + 0.75 * boostFraction)
+
+			self.turboAirCounter += 1
+			if self.turboAirCounter % 64 == 1 then
+				local targetAirHz = clamp(
+					480 + 1850 * math.sqrt(turbo) + 360 * load + 140 * boostFraction,
+					450,
+					3200
+				)
+				self.turboAirFilterHz += (targetAirHz - self.turboAirFilterHz) * 0.35
+				setBandpass(self.turboAirFilter, sampleRate, self.turboAirFilterHz, 1.05)
+			end
+
+			local turbineBand = processBiquad(self.turboAirFilter, pinkNoise)
 			local turbineAir = self.turboNoiseHigh - self.turboNoiseLow
-			boostWhine += turbineAir * turbo * (0.045 + 0.055 * load)
-				* (0.45 + 0.35 * (p.whine or 0.3))
+			local airflowBed = (turbineBand * 0.25 + turbineAir * 0.12)
+				* airflowDrive * (0.55 + 0.45 * load)
+			local spoolRush = (noise - self.whooshLp) * self.turboRiseEnv
+				* turbo * (0.05 + 0.06 * boostFraction)
+			boostWhine += airflowBed + spoolRush
+
+			if turboWhine and turbo > 0.015 then
+				local targetWhineHz = clamp(
+					(320 + 2350 * math.sqrt(turbo) + 200 * load + 120 * boostFraction)
+						* (p.whinePitch or 1),
+					300,
+					3600
+				)
+				self.turboWhineHz += (targetWhineHz - self.turboWhineHz)
+					* (1 - math.exp(-1 / (0.055 * sampleRate)))
+				self.turboPhase += self.turboWhineHz / sampleRate
+				if self.turboPhase >= 1 then
+					self.turboPhase -= math.floor(self.turboPhase)
+				end
+				local phase = self.turboPhase * TAU
+				local toneDrive = math.pow(turbo, 1.25)
+					* math.pow(0.08 + 0.92 * load, 0.75)
+					* (p.whine or 0)
+				boostWhine += (math.sin(phase) + 0.10 * math.sin(phase * 2 + 0.16))
+					* toneDrive * 0.015
+			end
 		end
 
 		local bov = 0
@@ -864,7 +914,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.bovEnvelope / math.max(0.05, self.bovStart), 0, 1
 			)
 			bov *= releaseEnvelope
-			self.bovEnvelope *= math.exp(-1 / (0.28 * sampleRate))
+			self.bovEnvelope *= math.exp(-1 / (0.24 * sampleRate))
 			if self.surgeFade < 0.01 and (load > 0.2 or spool < 0.06)
 				and self.bovEnvelope < 0.01 then
 				self.bovEnvelope = 0
@@ -874,13 +924,11 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		-- Straight-cut gearbox whirr: keep the mesh character, but avoid the
-		-- piercing dual-sine stack. A broad, speed-following noise resonance carries
-		-- the gear texture while one subdued, smoothly tracked tone supplies the whine.
+		-- Straight-cut gearbox whine: the tooth-mesh tone is now the main voice.
+		-- A small band-limited texture keeps it mechanical without turning it into hiss.
 		local gearTone = 0
 		local targetGearWhineMix = 0
 		if gearWhine > 0 and gear > 0 and omegaIn > 1 then
-			targetGearWhineMix = 1
 			local outputHz = (omegaIn / gearRatio) / TAU
 			local inputHz = omegaIn / TAU
 			local order = (p.gearWhineTeeth and p.gearWhineTeeth[gear])
@@ -889,36 +937,38 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local meshHz = outputHz * order
 			local inputMeshHz = inputHz * inputOrder
 			local inputShare = clamp(p.gearWhineIn or 0.3, 0, 1)
-			-- Mostly follow this gear's output tooth rate, with a small input-shaft
-			-- contribution. The input component never drives a sharp high-frequency tone.
 			local sourceHz = meshHz * (1 - 0.25 * inputShare)
 				+ inputMeshHz * (0.25 * inputShare)
-			-- Compress the tooth-mesh frequency into a comfortable audible range.
-			local targetHz = clamp(260 + math.sqrt(math.max(0, sourceHz)) * 13, 380, 1450)
+			-- Real gear mesh is a tonal, speed-linked whine; keep it in the upper-mid band.
+			local targetHz = clamp(850 + math.sqrt(math.max(0, sourceHz)) * 32, 1400, 3400)
 			self.gearWhineHz += (targetHz - self.gearWhineHz)
-				* (1 - math.exp(-1 / (0.035 * sampleRate)))
+				* (1 - math.exp(-1 / (0.022 * sampleRate)))
 			self.gearWhineCounter += 1
 			if self.gearWhineCounter % 64 == 1 then
-				setBandpass(self.gearWhineFilter, sampleRate, self.gearWhineHz, 1.25)
+				setBandpass(self.gearWhineFilter, sampleRate, self.gearWhineHz, 2.0)
 			end
 			self.gearWhinePhase += self.gearWhineHz / sampleRate
 			if self.gearWhinePhase >= 1 then
 				self.gearWhinePhase -= math.floor(self.gearWhinePhase)
 			end
-			local meshTone = math.sin(self.gearWhinePhase * TAU)
+			local phase = self.gearWhinePhase * TAU
+			local meshTone = math.sin(phase)
+			local meshHarmonic = math.sin(phase * 2 + 0.13)
 			local gearNoise = processBiquad(self.gearWhineFilter, pinkNoise)
 			local torqueFactor = clamp(math.abs(shaftTorque) / math.max(1, p.peakTorque), 0, 1.5)
-			local loadMix = 0.65 + 0.35 * clamp(torqueFactor, 0, 1)
-			gearTone = gearWhine * loadMix
-				* (gearNoise * (0.62 + 0.10 * inputShare)
-					+ meshTone * (0.055 + 0.022 * inputShare))
+			local loadMix = 0.55 + 0.45 * clamp(torqueFactor, 0, 1)
+			local speedMix = clamp((inputHz - 8) / 55, 0, 1)
+			targetGearWhineMix = speedMix
+			gearTone = gearWhine * loadMix * speedMix
+				* (gearNoise * (0.12 + 0.035 * inputShare)
+					+ meshTone * (0.22 + 0.08 * inputShare)
+					+ meshHarmonic * (0.045 + 0.02 * inputShare))
 		end
 		local gearMixTau = targetGearWhineMix > self.gearWhineMix and 0.025 or 0.065
 		self.gearWhineMix += (targetGearWhineMix - self.gearWhineMix)
 			* (1 - math.exp(-1 / (gearMixTau * sampleRate)))
 		gearTone *= self.gearWhineMix
-		-- Boost the filtered mechanical layer without restoring the old piercing dual-tone.
-		gearTone *= 1.35
+		gearTone *= 1.15
 		local ersTone = 0
 		if (p.mguk or 0) > 0 then
 			local ersFrequency = rpm * 0.16
