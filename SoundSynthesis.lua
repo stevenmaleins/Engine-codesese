@@ -291,7 +291,6 @@ function SoundSynthesis.new(params, sampleRate)
 		gearWhineFilter = newBiquad(),
 		gearWhineHz = 600,
 		gearWhinePhase = 0,
-		gearWhineAltPhase = 0,
 		gearWhineMix = 0,
 		gearWhineGearGain = 0.22,
 		gearWhineCounter = 0,
@@ -794,10 +793,12 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			local turbineAir = self.turboNoiseHigh - self.turboNoiseLow
 			-- Keep the always-on compressor bed well behind the engine.
 			-- The separate BOV section below retains the audible lift-off flutter.
-			local airflowBed = (turbineBand * 0.035 + turbineAir * 0.016)
+			-- Target about a 40% reduction from the original airflow layer:
+			-- audible under load, but still comfortably behind the engine.
+			local airflowBed = (turbineBand * 0.09 + turbineAir * 0.042)
 				* airflowDrive * (0.55 + 0.45 * load)
 			local spoolRush = (noise - self.whooshLp) * self.turboRiseEnv
-				* turbo * (0.008 + 0.009 * boostFraction)
+				* turbo * (0.018 + 0.021 * boostFraction)
 			boostWhine += airflowBed + spoolRush
 
 			if turboWhine and turbo > 0.015 then
@@ -878,24 +879,33 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				end
 				-- Flutter rate controls the repetition of noisy compressor-surging puffs;
 				-- no pitched harmonic stack is added to the airflow itself.
-				self.surgePhase += clamp(p.flRate or 14, 5, 28)
-					* (0.65 + 0.7 * spool) / sampleRate
+				-- Let pressure/flow change the chatter cadence slightly instead of
+				-- repeating a perfectly clocked loop at one fixed rate.
+				local pulseRate = clamp(p.flRate or 14, 5, 28)
+					* (0.65 + 0.7 * spool)
+					* clamp(0.9 + 0.10 * math.abs(self.bovFlow) + 0.12 * self.bovRev, 0.78, 1.25)
+				self.surgePhase += pulseRate / sampleRate
 				if self.surgePhase >= 1 then
 					self.surgePhase -= math.floor(self.surgePhase)
 				end
 				local pulse = math.max(0, math.sin(self.surgePhase * TAU))
+				-- Short, distinct chuffs with quiet gaps sound more like compressor surge
+				-- than a continuous sheet of broadband "leaf rustle" noise.
+				pulse *= pulse
 				pulse *= pulse
 				local surgeNoise = pinkNoise - self.turboNoiseLow
-				local flowGate = 0.35 + 0.65 * math.min(1, self.bovRev * 2 + 0.12)
-				local ventBase = (self.whooshLp * 0.35
-					+ surgeNoise * (0.18 + 0.95 * pulse) * flowGate)
+				local flowGate = 0.18 + 0.82 * math.min(1, self.bovRev * 2 + 0.08)
+				local ventBase = (self.whooshLp * 0.18
+					+ surgeNoise * (0.015 + 1.12 * pulse) * flowGate)
 					* pressureMix * spool * spool
-				local filteredVent = processBiquad(self.bovBp, ventBase) * 2.2
+				local filteredVent = processBiquad(self.bovBp, ventBase) * 2.5
+				-- Keep only a trace of hiss between the pulses; the pulse itself carries
+				-- the flutter, not a constant layer of high-frequency noise.
 				local ventHiss = (noise - self.whooshLp) * pressureMix
-					* spool * spool * (0.32 + 0.48 * pulse) * (p.flHiss or 0.6)
-				local ventTail = processBiquad(self.bovBp2, math.max(0, -flowStep) * 25 * spool)
+					* spool * spool * (0.015 + 0.12 * pulse) * (p.flHiss or 0.6)
+				local ventTail = processBiquad(self.bovBp2, math.max(0, -flowStep) * 22 * spool)
 				bov = (filteredVent + ventHiss + ventTail)
-					* math.min(1, self.bovStart / 0.6) * 1.10 * self.surgeFade * (p.flLevel or 0.5)
+					* math.min(1, self.bovStart / 0.6) * 1.15 * self.surgeFade * (p.flLevel or 0.5)
 			else
 				-- Vent-style valves use a decaying pressure reservoir and broad airflow noise.
 				self.ventP = math.max(0, self.ventP - (0.5 + 2.5 * load) / sampleRate)
@@ -909,10 +919,11 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.bovFilterCounter += 1
 				if self.bovFilterCounter % 64 == 1 then
 					setBandpass(self.bovBp, sampleRate,
-						clamp(1200 + 3500 * math.sqrt(math.min(1, self.ventP / math.max(0.1, p.boost or 1))), 500, 4200), 0.8)
+						clamp(850 + 2800 * math.sqrt(math.min(1, self.ventP / math.max(0.1, p.boost or 1))), 450, 3400), 0.9)
 				end
-				bov = (processBiquad(self.bovBp, noise) * 2.2
-					+ (noise - self.whooshLp) * 0.35) * self.jetState * 0.62 * (p.flLevel or 0.5)
+				-- A slightly warmer, less steamy vent hiss; keep this secondary change modest.
+				bov = (processBiquad(self.bovBp, noise) * 1.85
+					+ (noise - self.whooshLp) * 0.27) * self.jetState * 0.62 * (p.flLevel or 0.5)
 			end
 			-- Give the release a real amplitude envelope; previously this value only
 			-- kept the branch alive while the sound stayed at nearly constant level.
@@ -966,14 +977,10 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			if self.gearWhinePhase >= 1 then
 				self.gearWhinePhase -= math.floor(self.gearWhinePhase)
 			end
-			self.gearWhineAltPhase += (self.gearWhineHz * 1.002) / sampleRate
-			if self.gearWhineAltPhase >= 1 then
-				self.gearWhineAltPhase -= math.floor(self.gearWhineAltPhase)
-			end
-
+			-- Keep one phase-continuous oscillator. The former detuned duplicate
+			-- produced a repeating beat/pulse that sounded like a pitch-loop artifact.
 			local phase = self.gearWhinePhase * TAU
-			local meshTone = math.sin(phase) * 0.86
-				+ math.sin(self.gearWhineAltPhase * TAU) * 0.14
+			local meshTone = math.sin(phase)
 			local meshHarmonic = math.sin(phase * 2 + 0.13)
 			local gearNoise = processBiquad(self.gearWhineFilter, pinkNoise)
 			local torqueFactor = clamp(math.abs(shaftTorque) / math.max(1, p.peakTorque), 0, 1.5)
