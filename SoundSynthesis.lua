@@ -253,15 +253,7 @@ function SoundSynthesis.new(params, sampleRate)
 		soundTurbo = 0,
 		turboPhase = 0,
 		whooshLp = 0,
-		turboNoiseHigh = 0,
-		turboNoiseLow = 0,
-		turboNoiseHighCoef = coefficient(sampleRate, 2200),
-		turboNoiseLowCoef = coefficient(sampleRate, 350),
-		turboAirFilter = newBiquad(),
-		turboAirFilterHz = 900,
-		turboAirCounter = 0,
 		turboWhineHz = 700,
-		turboRiseEnv = 0,
 		prevPsi = table.create(math.max(1, #firing), 0),
 		p0 = table.create(math.max(1, #firing), 0),
 		pe = table.create(math.max(1, #firing), 0),
@@ -518,14 +510,9 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local boost = math.max(0, boostFrom + (boostTo - boostFrom) * alpha)
 		local turboTarget = math.max(0, turboFrom + (turboTo - turboFrom) * alpha)
 		local turboTau = turboTarget > self.soundTurbo and 0.060 or 0.17
-		local previousSoundTurbo = self.soundTurbo
 		self.soundTurbo += (turboTarget - self.soundTurbo)
 			* (1 - math.exp(-1 / (turboTau * sampleRate)))
 		local turbo = self.soundTurbo
-		local spoolRiseTarget = clamp((turbo - previousSoundTurbo) * sampleRate / 32, 0, 1)
-		local spoolRiseTau = spoolRiseTarget > self.turboRiseEnv and 0.008 or 0.055
-		self.turboRiseEnv += (spoolRiseTarget - self.turboRiseEnv)
-			* (1 - math.exp(-1 / (spoolRiseTau * sampleRate)))
 		local omegaIn = math.max(0, omegaInFrom + (omegaInTo - omegaInFrom) * alpha)
 		local shaftTorque = shaftFrom + (shaftTo - shaftFrom) * alpha
 		local liftTime = math.max(0, liftFrom + (liftTo - liftFrom) * alpha)
@@ -769,45 +756,19 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				* (p.whine or 0) * load * math.pow(math.max(0, rpmFraction), 2) * 0.024
 		end
 
-		self.turboNoiseHigh += self.turboNoiseHighCoef * (pinkNoise - self.turboNoiseHigh)
-		self.turboNoiseLow += self.turboNoiseLowCoef * (pinkNoise - self.turboNoiseLow)
-		self.whooshLp += 0.25 * (noise - self.whooshLp)
-
 		if p.induction == "turbo" then
-			local boostFraction = clamp(boost / math.max(0.15, p.boost or 1), 0, 1)
-			local airflowDrive = turbo * (0.18 + 0.82 * load)
-				* (0.25 + 0.75 * boostFraction)
+			-- The reference worklet uses one low-passed airflow voice, not a stack
+			-- of high-band filtered noise. Keep it about 40% below its reference gain.
+			self.whooshLp += 0.25 * (noise - self.whooshLp)
+			local airflowPressure = 0.3 + 0.7 * math.min(1, load * 1.5)
+			local compressorAirflow = self.whooshLp
+				* airflowPressure * turbo * turbo * 0.036
+			boostWhine += compressorAirflow
 
-			self.turboAirCounter += 1
-			if self.turboAirCounter % 64 == 1 then
-				local targetAirHz = clamp(
-					480 + 1850 * math.sqrt(turbo) + 360 * load + 140 * boostFraction,
-					450,
-					3200
-				)
-				self.turboAirFilterHz += (targetAirHz - self.turboAirFilterHz) * 0.35
-				setBandpass(self.turboAirFilter, sampleRate, self.turboAirFilterHz, 1.05)
-			end
-
-			local turbineBand = processBiquad(self.turboAirFilter, pinkNoise)
-			local turbineAir = self.turboNoiseHigh - self.turboNoiseLow
-			-- Keep the always-on compressor bed well behind the engine.
-			-- The separate BOV section below retains the audible lift-off flutter.
-			-- Target about a 40% reduction from the original airflow layer:
-			-- audible under load, but still comfortably behind the engine.
-			local airflowBed = (turbineBand * 0.09 + turbineAir * 0.042)
-				* airflowDrive * (0.55 + 0.45 * load)
-			local spoolRush = (noise - self.whooshLp) * self.turboRiseEnv
-				* turbo * (0.018 + 0.021 * boostFraction)
-			boostWhine += airflowBed + spoolRush
-
+			-- Follow the reference compressor speed curve, but retain the quieter
+			-- whistle gain so the engine remains the dominant sound.
 			if turboWhine and turbo > 0.015 then
-				local targetWhineHz = clamp(
-					(320 + 2350 * math.sqrt(turbo) + 200 * load + 120 * boostFraction)
-						* (p.whinePitch or 1),
-					300,
-					3600
-				)
+				local targetWhineHz = (200 + 3200 * turbo) * (p.whinePitch or 1)
 				self.turboWhineHz += (targetWhineHz - self.turboWhineHz)
 					* (1 - math.exp(-1 / (0.055 * sampleRate)))
 				self.turboPhase += self.turboWhineHz / sampleRate
@@ -815,13 +776,8 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 					self.turboPhase -= math.floor(self.turboPhase)
 				end
 				local phase = self.turboPhase * TAU
-				local toneDrive = math.pow(turbo, 1.25)
-					* math.pow(0.08 + 0.92 * load, 0.75)
-					* (p.whine or 0)
-				-- Keep the pitched compressor whistle behind the combustion/exhaust voice.
-				-- The airflow bed and BOV flutter remain separate, less tonal layers.
-				boostWhine += (math.sin(phase) + 0.10 * math.sin(phase * 2 + 0.16))
-					* toneDrive * 0.0025
+				boostWhine += (math.sin(phase) + 0.3 * math.sin(phase * 2))
+					* (p.whine or 0) * turbo * turbo * 0.0025
 			end
 		end
 
@@ -829,9 +785,9 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		if p.induction == "turbo" and self.bovEnvelope > 0.002 then
 			local spool = clamp(turbo, 0, 1.2)
 			if p.bov == "flutter" then
-				-- A simple pressure-flow oscillator naturally changes pulse spacing
-				-- as spool and engine load change; the airflow noise is band-limited.
-				local flowScale = math.max(0.12, spool)
+				-- Direct port of the reference worklet's compressor pressure/flow oscillator.
+				-- flRate controls the pressure/flow dynamics; it is not the audible pulse pitch.
+				local flowScale = clamp(spool, 0, 1.2)
 				local halfFlow = 0.5 * flowScale + 0.02
 				local pressureForce = 0.6 * flowScale * flowScale
 				local spring = 0.15 * flowScale * flowScale
@@ -844,12 +800,13 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 					local ratio = self.bovFlow / halfFlow
 					flowCurve = spring + 0.5 * pressureForce * ratio * ratio
 				end
-				local scale = 1.5 * (0.5 + 0.5 * flowScale)
-				local step = TAU * (p.flRate or 14) * 1.25
+
+				local flowScaleFactor = 1.5 * (0.5 + 0.5 * flowScale)
+				local flowStepSize = TAU * (p.flRate or 14) * 1.25
 					* (0.35 + 0.65 * flowScale) / sampleRate
-				local damping = (0.06 + 3 * physicalThrottle) * math.sqrt(math.max(0, self.bovPressure))
-				local pressureStep = scale * (flowCurve - self.bovPressure) * step
-				local flowStep = (self.bovFlow - damping) / scale * step
+				local damping = (0.06 + 3 * load) * math.sqrt(math.max(0, self.bovPressure))
+				local pressureStep = flowScaleFactor * (flowCurve - self.bovPressure) * flowStepSize
+				local flowStep = (self.bovFlow - damping) / flowScaleFactor * flowStepSize
 				self.bovFlow = clamp(self.bovFlow + pressureStep, -3, 3)
 				self.bovPressure = clamp(self.bovPressure + flowStep, -0.5, 3)
 
@@ -859,10 +816,9 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				self.bovRev += (negativeFlow - self.bovRev)
 					* (1 - math.exp(-1 / (revTau * sampleRate)))
 
-				-- Use the actual throttle edge for release timing. Smoothed engine load
-				-- lags behind the pedal and made the flutter start late or disappear.
-				local stillReleasing = physicalThrottle > 0.12 or spool < 0.06
-				local fadeTau = stillReleasing and 0.018 or 0.004
+				-- The original model fades surge out under load and back in after lift-off.
+				local stillReleasing = load > 0.2 or flowScale < 0.06
+				local fadeTau = stillReleasing and 0.06 or 0.01
 				local fadeTarget = stillReleasing and 0 or 1
 				self.surgeFade += (fadeTarget - self.surgeFade)
 					* (1 - math.exp(-1 / (fadeTau * sampleRate)))
@@ -872,40 +828,36 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				pressureMix += (surgeTarget - pressureMix) * self.surgeFade
 
 				self.bovFilterCounter += 1
+				local flutterHz = (p.flPitch or 650) * (0.3 + 0.7 * flowScale)
 				if self.bovFilterCounter % 64 == 1 then
-					local centreHz = clamp((p.flPitch or 650) * (0.3 + 0.7 * spool), 170, 2400)
-					setBandpass(self.bovBp, sampleRate, centreHz, 2.0)
-					setBandpass(self.bovBp2, sampleRate, clamp(p.flPitchEnd or 130, 70, 700), 2.5)
+					setBandpass(self.bovBp, sampleRate, flutterHz, 5.0)
+					setBandpass(self.bovBp2, sampleRate,
+						clamp(p.flPitchEnd or 130, 70, 700), 4.0)
 				end
-				-- Flutter rate controls the repetition of noisy compressor-surging puffs;
-				-- no pitched harmonic stack is added to the airflow itself.
-				-- Let pressure/flow change the chatter cadence slightly instead of
-				-- repeating a perfectly clocked loop at one fixed rate.
-				local pulseRate = clamp(p.flRate or 14, 5, 28)
-					* (0.65 + 0.7 * spool)
-					* clamp(0.9 + 0.10 * math.abs(self.bovFlow) + 0.12 * self.bovRev, 0.78, 1.25)
-				self.surgePhase += pulseRate / sampleRate
+
+				-- This phase-continuous harmonic waveform is the actual stutter sound.
+				-- Its amplitude follows reverse compressor flow, not a gated random-noise pulse.
+				self.surgePhase += flutterHz / sampleRate
 				if self.surgePhase >= 1 then
 					self.surgePhase -= math.floor(self.surgePhase)
 				end
-				local pulse = math.max(0, math.sin(self.surgePhase * TAU))
-				-- Short, distinct chuffs with quiet gaps sound more like compressor surge
-				-- than a continuous sheet of broadband "leaf rustle" noise.
-				pulse *= pulse
-				pulse *= pulse
-				local surgeNoise = pinkNoise - self.turboNoiseLow
-				local flowGate = 0.18 + 0.82 * math.min(1, self.bovRev * 2 + 0.08)
-				local ventBase = (self.whooshLp * 0.18
-					+ surgeNoise * (0.015 + 1.12 * pulse) * flowGate)
-					* pressureMix * spool * spool
-				local filteredVent = processBiquad(self.bovBp, ventBase) * 2.5
-				-- Keep only a trace of hiss between the pulses; the pulse itself carries
-				-- the flutter, not a constant layer of high-frequency noise.
+				local flutterPhase = self.surgePhase * TAU
+				local flutterWave = math.sin(flutterPhase)
+					+ 0.45 * math.sin(flutterPhase * 2)
+					+ 0.20 * math.sin(flutterPhase * 3)
+					+ 0.10 * math.sin(flutterPhase * 4)
+
+				local ventBase = (self.whooshLp * 0.6
+					+ flutterWave * 0.25 * self.bovRev)
+					* pressureMix * flowScale * flowScale
+				local filteredVent = processBiquad(self.bovBp, ventBase) * 4.0
 				local ventHiss = (noise - self.whooshLp) * pressureMix
-					* spool * spool * (0.015 + 0.12 * pulse) * (p.flHiss or 0.6)
-				local ventTail = processBiquad(self.bovBp2, math.max(0, -flowStep) * 22 * spool)
+					* flowScale * flowScale * 0.6 * (p.flHiss or 0.6)
+				local ventTail = processBiquad(self.bovBp2,
+					math.max(0, -flowStep) * 25 * flowScale)
 				bov = (filteredVent + ventHiss + ventTail)
-					* math.min(1, self.bovStart / 0.6) * 1.15 * self.surgeFade * (p.flLevel or 0.5)
+					* math.min(1, self.bovStart / 0.6) * 1.8
+					* self.surgeFade * (p.flLevel or 0.5)
 			else
 				-- Vent-style valves use a decaying pressure reservoir and broad airflow noise.
 				self.ventP = math.max(0, self.ventP - (0.5 + 2.5 * load) / sampleRate)
@@ -927,17 +879,27 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 			-- Give the release a real amplitude envelope; previously this value only
 			-- kept the branch alive while the sound stayed at nearly constant level.
-			local releaseEnvelope = clamp(
-				self.bovEnvelope / math.max(0.05, self.bovStart), 0, 1
-			)
-			bov *= releaseEnvelope
-			self.bovEnvelope *= math.exp(-1 / (0.24 * sampleRate))
-			if self.surgeFade < 0.01 and (load > 0.2 or spool < 0.06)
-				and self.bovEnvelope < 0.01 then
-				self.bovEnvelope = 0
-				self.bovFlow = 0
-				self.bovPressure = 0
-				self.bovRev = 0
+			if p.bov == "flutter" then
+				-- Match the reference envelope: surgeFade shapes the sound, and the
+				-- event is cleared when load/spool has faded the surge away.
+				if self.surgeFade < 0.02 and (load > 0.2 or spool < 0.06) then
+					self.bovEnvelope = 0
+					self.bovFlow = 0
+					self.bovPressure = 0
+					self.bovRev = 0
+				end
+			else
+				local releaseEnvelope = clamp(
+					self.bovEnvelope / math.max(0.05, self.bovStart), 0, 1
+				)
+				bov *= releaseEnvelope
+				self.bovEnvelope *= math.exp(-1 / (0.24 * sampleRate))
+				if self.bovEnvelope < 0.01 then
+					self.bovEnvelope = 0
+					self.ventP = 0
+					self.ventV = 0
+					self.jetState = 0
+				end
 			end
 		end
 
