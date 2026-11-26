@@ -193,13 +193,13 @@ local function newExhaustChain(params, sampleRate, lengthScale)
 	return {
 		collector = makeDelay(delayMs(params.collectorLength), -0.13, 3200, sampleRate),
 		chamber = makeDelay(delayMs(params.chamber), 0.12, 1900, sampleRate),
-		tail = makeDelay(delayMs(params.tailLength), -0.10, 3400 - 1300 * muffler, sampleRate),
+		tail = makeDelay(delayMs(params.tailLength), -0.10, 3600 - 1300 * muffler, sampleRate),
 		muffler = muffler,
 		chamberGain = params.chamberGain or 0.5,
 		mufLp = 0,
 		mufLpCoef = coefficient(sampleRate, 10000 - 7500 * muffler),
 		air = 0,
-		airCoef = coefficient(sampleRate, 2850),
+		airCoef = coefficient(sampleRate, 3150),
 		radLp = 0,
 		radCoef = coefficient(sampleRate, 58),
 		previous = 0,
@@ -482,7 +482,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		if math.abs(chain.muffler - self.mufflerState) > 0.003 then
 			chain.muffler = self.mufflerState
 			chain.mufLpCoef = coefficient(sampleRate, 10000 - 7500 * self.mufflerState)
-			chain.tail.lpCoef = coefficient(sampleRate, 3400 - 1300 * self.mufflerState)
+			chain.tail.lpCoef = coefficient(sampleRate, 3600 - 1300 * self.mufflerState)
 		end
 	end
 
