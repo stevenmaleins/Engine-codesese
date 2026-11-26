@@ -293,7 +293,7 @@ function SoundSynthesis.new(params, sampleRate)
 		gearWhinePhase = 0,
 		gearWhineAltPhase = 0,
 		gearWhineMix = 0,
-		gearWhineGearGain = 0.16,
+		gearWhineGearGain = 0.22,
 		gearWhineCounter = 0,
 		headers = headers,
 		chains = chains,
@@ -938,7 +938,7 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		local gearPosition = gearCount > 1
 			and clamp((gear - 1) / (gearCount - 1), 0, 1) or 0
 		local targetGearGain = gear > 0
-			and (0.16 + 0.84 * math.pow(gearPosition, 1.15)) or 0.16
+			and (0.22 + 0.78 * math.pow(gearPosition, 1.15)) or 0.22
 
 		-- A road-speed gate prevents a gearbox tone from leaking into idle,
 		-- even when the transmission is in first gear with the clutch engaged.
