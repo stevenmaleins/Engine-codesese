@@ -119,7 +119,7 @@ local function makeParams(selectedPreset)
 		room = 0.10,
 		cabin = 0.10,
 		wind = 1,
-		master = 0.8,
+		master = 0.74,
 		clip = 0.15,
 		tractionControl = true,
 	})
