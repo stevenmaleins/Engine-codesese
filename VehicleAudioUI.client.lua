@@ -33,7 +33,7 @@ end
 -- so it never overflows small screens / phones)
 ----------------------------------------------------------------------
 local DESIGN_W = 620
-local PANEL_H = 292
+local PANEL_H = 336
 local POPUP_H = 224
 local POPUP_GAP = 8
 local EDGE_MARGIN = 16
@@ -642,9 +642,57 @@ local backfireButton = makeButton(controlsRow, "BACKFIRE  OFF", {
 })
 
 ----------------------------------------------------------------------
+-- Straight-cut gearbox whine gain (multiplier applied to each preset's own level)
+----------------------------------------------------------------------
+local gearWhineRow = makeRow(36, 6)
+local gearWhineCard = newFrame(gearWhineRow, { Size = UDim2.new(1, 0, 1, 0) }, 12)
+stroke(gearWhineCard, COLORS.line, 1, 0.3)
+
+newLabel(gearWhineCard, "GEARBOX WHINE GAIN", 11, Enum.Font.GothamBold, COLORS.text, {
+	Position = UDim2.fromOffset(12, 2),
+	Size = UDim2.fromOffset(240, 15),
+})
+local gearWhineInfoLabel = newLabel(gearWhineCard, "Preset whine level: checking...", 10, Enum.Font.GothamMedium, COLORS.muted, {
+	Position = UDim2.fromOffset(12, 18),
+	Size = UDim2.new(1, -190, 0, 12),
+	TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local gearWhineDownButton = makeButton(gearWhineCard, "−", {
+	Position = UDim2.new(1, -142, 0, 3),
+	Size = UDim2.fromOffset(30, 30),
+	TextSize = 16,
+})
+local gearWhineValueBox = Instance.new("TextBox")
+gearWhineValueBox.Name = "GearWhineMultiplier"
+gearWhineValueBox.ClearTextOnFocus = false
+gearWhineValueBox.Text = "1.00"
+gearWhineValueBox.Font = Enum.Font.GothamBold
+gearWhineValueBox.TextSize = 12
+gearWhineValueBox.TextColor3 = COLORS.text
+gearWhineValueBox.TextXAlignment = Enum.TextXAlignment.Center
+gearWhineValueBox.BackgroundColor3 = COLORS.surfaceHi
+gearWhineValueBox.BorderSizePixel = 0
+gearWhineValueBox.Position = UDim2.new(1, -112, 0, 3)
+gearWhineValueBox.Size = UDim2.fromOffset(56, 30)
+gearWhineValueBox.Parent = gearWhineCard
+corner(gearWhineValueBox, 8)
+local gearWhineValueStroke = stroke(gearWhineValueBox, COLORS.line, 1, 0.15)
+local gearWhineUnitLabel = newLabel(gearWhineCard, "×", 12, Enum.Font.GothamBold, COLORS.muted, {
+	Position = UDim2.new(1, -56, 0, 3),
+	Size = UDim2.fromOffset(14, 30),
+	TextXAlignment = Enum.TextXAlignment.Center,
+})
+local gearWhineUpButton = makeButton(gearWhineCard, "+", {
+	Position = UDim2.new(1, -42, 0, 3),
+	Size = UDim2.fromOffset(30, 30),
+	TextSize = 16,
+})
+
+----------------------------------------------------------------------
 -- Key hints
 ----------------------------------------------------------------------
-local footerRow = makeRow(16, 6)
+local footerRow = makeRow(16, 7)
 local footerLayout = Instance.new("UIListLayout")
 footerLayout.FillDirection = Enum.FillDirection.Horizontal
 footerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
@@ -950,6 +998,35 @@ track(backfireButton.MouseButton1Click:Connect(function()
 	commandEvent:Fire("SetBackfireEnabled", not (latestSnapshot and latestSnapshot.backfireEnabled))
 end))
 
+local function setGearWhineMultiplier(value)
+	local multiplier = math.clamp(tonumber(value) or 1, 0, 3)
+	multiplier = math.floor(multiplier * 100 + 0.5) / 100
+	commandEvent:Fire("SetGearWhineMultiplier", multiplier)
+end
+
+local function stepGearWhine(delta)
+	local current = latestSnapshot and tonumber(latestSnapshot.gearWhineMultiplier) or 1
+	setGearWhineMultiplier(current + delta)
+end
+
+track(gearWhineDownButton.MouseButton1Click:Connect(function()
+	stepGearWhine(-0.10)
+end))
+track(gearWhineUpButton.MouseButton1Click:Connect(function()
+	stepGearWhine(0.10)
+end))
+track(gearWhineValueBox.Focused:Connect(function()
+	tween(gearWhineValueStroke, TWEEN_FAST, { Color = COLORS.accent })
+end))
+track(gearWhineValueBox.FocusLost:Connect(function()
+	tween(gearWhineValueStroke, TWEEN_FAST, { Color = COLORS.line })
+	local value = tonumber(gearWhineValueBox.Text)
+	if value == nil then
+		value = latestSnapshot and tonumber(latestSnapshot.gearWhineMultiplier) or 1
+	end
+	setGearWhineMultiplier(value)
+end))
+
 ----------------------------------------------------------------------
 -- Snapshot -> UI
 ----------------------------------------------------------------------
@@ -1039,6 +1116,22 @@ local function applySnapshot(snapshot)
 			backfireOn and COLORS.orange or COLORS.line
 		)
 	end
+
+	-- Gearbox whine gain: preset values stay unique; this is a shared multiplier.
+	local gearWhineMultiplier = math.clamp(tonumber(snapshot.gearWhineMultiplier) or 1, 0, 3)
+	if shown.gearWhineMultiplier ~= gearWhineMultiplier then
+		shown.gearWhineMultiplier = gearWhineMultiplier
+		if not gearWhineValueBox:IsFocused() then
+			gearWhineValueBox.Text = string.format("%.2f", gearWhineMultiplier)
+		end
+	end
+	local presetWhine = math.max(0, tonumber(snapshot.gearWhinePresetLevel) or 0)
+	local whineAvailable = snapshot.gearWhineAvailable == true
+	gearWhineInfoLabel.Text = whineAvailable
+		and string.format("PRESET %.2f×  •  multiplier affects whine-enabled cars", presetWhine)
+		or "No gearbox whine on this preset — try Subaru WRC, GT3 Cup or F1"
+	gearWhineInfoLabel.TextColor3 = whineAvailable and COLORS.accent or COLORS.muted
+	gearWhineUnitLabel.TextColor3 = gearWhineMultiplier > 0 and COLORS.text or COLORS.muted
 
 	-- Audio status pill
 	local ready = snapshot.audioReady == true
