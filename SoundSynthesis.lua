@@ -261,7 +261,6 @@ function SoundSynthesis.new(params, sampleRate)
 		turboAirFilterHz = 900,
 		turboAirCounter = 0,
 		turboWhineHz = 700,
-		turboLastSample = 0,
 		turboRiseEnv = 0,
 		prevPsi = table.create(math.max(1, #firing), 0),
 		p0 = table.create(math.max(1, #firing), 0),
