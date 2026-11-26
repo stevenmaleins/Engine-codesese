@@ -746,8 +746,8 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 			end
 		end
 
-		-- Induction tone, compressor airflow and spool-up are separate voices.
-		-- Airflow responds to load/boost on every turbo preset; p.whine only enables the pitched whistle.
+		-- Induction tone and compressor airflow are separate voices.
+		-- The airflow bed runs on every turbo preset; p.whine enables the pitched whistle.
 		boostWhine = 0
 		if superWhine then
 			local frequency = rpm / 60 * 11.2 * (p.whinePitch or 1)
@@ -877,8 +877,8 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 				bov = (processBiquad(self.bovBp, noise) * 1.85
 					+ (noise - self.whooshLp) * 0.27) * self.jetState * 0.62 * (p.flLevel or 0.5)
 			end
-			-- Give the release a real amplitude envelope; previously this value only
-			-- kept the branch alive while the sound stayed at nearly constant level.
+			-- Vent-style releases use their own decay. Compressor flutter instead
+			-- follows the reference worklet's load/spool-driven surgeFade envelope.
 			if p.bov == "flutter" then
 				-- Match the reference envelope: surgeFade shapes the sound, and the
 				-- event is cleared when load/spool has faded the surge away.
