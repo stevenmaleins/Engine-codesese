@@ -66,6 +66,8 @@ local preset = nil
 local params = nil
 local baseWind = 1
 local basePops = 0
+local baseGearWhine = 0
+local gearWhineMultiplier = 1.0
 local engine = nil
 local synth = nil
 local audioHandle = nil
@@ -107,6 +109,7 @@ local function applySoundOptions()
 	end
 	params.wind = windEnabled and (baseWind * windLevel) or 0
 	params.pops = backfireEnabled and basePops or 0
+	params.gearWhine = baseGearWhine * gearWhineMultiplier
 end
 
 local function makeParams(selectedPreset)
@@ -148,6 +151,9 @@ local function publishSnapshot(state)
 		windEnabled = windEnabled,
 		windLevel = windLevel,
 		backfireEnabled = backfireEnabled,
+		gearWhineMultiplier = gearWhineMultiplier,
+		gearWhinePresetLevel = baseGearWhine,
+		gearWhineAvailable = baseGearWhine > 0,
 		audioReady = audioHandle ~= nil and audioHandle.running == true,
 	}
 
@@ -182,8 +188,10 @@ local function selectEngine(index)
 
 	local selectedPreset = presets[index]
 	local newParams, newBaseWind, newBasePops = makeParams(selectedPreset)
+	local newBaseGearWhine = math.max(0, tonumber(newParams.gearWhine) or 0)
 	newParams.wind = windEnabled and (newBaseWind * windLevel) or 0
 	newParams.pops = backfireEnabled and newBasePops or 0
+	newParams.gearWhine = newBaseGearWhine * gearWhineMultiplier
 
 	local newEngine = EngineSimulation.new(newParams)
 	local newSynth = SoundSynthesis.new(newParams, 48000)
@@ -193,6 +201,7 @@ local function selectEngine(index)
 	params = newParams
 	baseWind = newBaseWind
 	basePops = newBasePops
+	baseGearWhine = newBaseGearWhine
 	engine = newEngine
 	synth = newSynth
 	currentIndex = index
@@ -266,6 +275,10 @@ commandEvent.Event:Connect(function(action, value)
 		refreshSoundSettings()
 	elseif action == "SetBackfireEnabled" then
 		backfireEnabled = value == true
+		refreshSoundSettings()
+	elseif action == "SetGearWhineMultiplier" then
+		gearWhineMultiplier = math.clamp(tonumber(value) or gearWhineMultiplier, 0, 3)
+		gearWhineMultiplier = math.floor(gearWhineMultiplier * 100 + 0.5) / 100
 		refreshSoundSettings()
 	end
 end)
