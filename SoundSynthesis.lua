@@ -254,6 +254,10 @@ function SoundSynthesis.new(params, sampleRate)
 		turboPhase = 0,
 		whooshLp = 0,
 		turboWhineHz = 700,
+		turboAirflowDuck = 0,
+		superWhinePhase = 0,
+		superWhinePhase2 = 0,
+		superWhineDriven = 0,
 		prevPsi = table.create(math.max(1, #firing), 0),
 		p0 = table.create(math.max(1, #firing), 0),
 		pe = table.create(math.max(1, #firing), 0),
@@ -750,19 +754,60 @@ function SoundSynthesis:RenderBlock(state, frameCount, previousState, alphaStart
 		-- The airflow bed runs on every turbo preset; p.whine enables the pitched whistle.
 		boostWhine = 0
 		if superWhine then
-			local frequency = rpm / 60 * 11.2 * (p.whinePitch or 1)
-			local phase = (self.audioTime * frequency) % 1
-			boostWhine = (math.sin(phase * TAU) + 0.10 * math.sin(phase * TAU * 2))
-				* (p.whine or 0) * load * math.pow(math.max(0, rpmFraction), 2) * 0.024
+			-- Reference-style supercharger whine: accumulate phase from the
+			-- instantaneous blower speed instead of recomputing phase from time.
+			-- This prevents RPM changes from making the tone jump or sound alien.
+			local targetHz = rpm / 60 * 2.8 * 4 * (p.whinePitch or 1)
+			local phaseStep = targetHz / sampleRate
+			self.superWhinePhase += phaseStep
+			if self.superWhinePhase >= 1 then
+				self.superWhinePhase -= math.floor(self.superWhinePhase)
+			end
+			self.superWhinePhase2 += phaseStep * 1.004
+			if self.superWhinePhase2 >= 1 then
+				self.superWhinePhase2 -= math.floor(self.superWhinePhase2)
+			end
+
+			local phase = self.superWhinePhase * TAU
+			local phase2 = self.superWhinePhase2 * TAU
+			local superWave = math.sin(phase)
+				+ load * (
+					0.60 * math.sin(phase2 * 2)
+					+ 0.35 * math.sin(phase * 3)
+					+ 0.25 * math.sin(phase2 * 4)
+				)
+
+			-- Match the reference's driven-state fade so the blower is tied to
+			-- the drivetrain, and build the classic whine as load and RPM rise.
+			local clutchEngaged = (state.clutch or 1) > 0.5
+			local drivenTarget = gear > 0 and clutchEngaged and 1 or 0
+			self.superWhineDriven += (drivenTarget - self.superWhineDriven)
+				* (1 - math.exp(-1 / (0.15 * sampleRate)))
+			local loadGate = clamp((load - 0.08) / 0.25, 0, 1)
+			local rpmMix = math.pow(math.min(1, rpmFraction * 1.1), 2.2)
+			local superGain = (p.whine or 0) * self.superWhineDriven
+				* loadGate * math.pow(math.max(0, load), 1.2)
+				* rpmMix * 0.16
+			boostWhine = superWave * superGain
 		end
 
 		if p.induction == "turbo" then
 			-- The reference worklet uses one low-passed airflow voice, not a stack
 			-- of high-band filtered noise. Keep it about 40% below its reference gain.
 			self.whooshLp += 0.25 * (noise - self.whooshLp)
+			local flutterActivity = 0
+			if p.bov == "flutter" and self.bovEnvelope > 0.002 then
+				flutterActivity = clamp(
+					self.bovEnvelope / math.max(0.05, self.bovStart), 0, 1
+				)
+			end
+			local airflowDuckTau = flutterActivity > self.turboAirflowDuck and 0.012 or 0.075
+			self.turboAirflowDuck += (flutterActivity - self.turboAirflowDuck)
+				* (1 - math.exp(-1 / (airflowDuckTau * sampleRate)))
+			local airflowBlend = 1 - 0.28 * self.turboAirflowDuck
 			local airflowPressure = 0.3 + 0.7 * math.min(1, load * 1.5)
 			local compressorAirflow = self.whooshLp
-				* airflowPressure * turbo * turbo * 0.036
+				* airflowPressure * turbo * turbo * 0.036 * airflowBlend
 			boostWhine += compressorAirflow
 
 			-- Follow the reference compressor speed curve, but retain the quieter
